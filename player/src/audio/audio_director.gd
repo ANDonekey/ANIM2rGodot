@@ -7,6 +7,7 @@ extends Node
 
 var pkg: GamePackage
 var current_bgm := -1
+var _voice_bus := -1
 
 @onready var _bgm: AudioStreamPlayer = $BGM
 @onready var _voice: AudioStreamPlayer = $Voice
@@ -16,6 +17,26 @@ var current_bgm := -1
 func setup(p_pkg: GamePackage) -> void:
 	pkg = p_pkg
 	DirAccess.make_dir_recursive_absolute("user://audio_cache")
+	# Route voice to its own bus so the stage can read its peak level
+	# for lip sync without the BGM polluting the measurement.
+	_voice_bus = AudioServer.get_bus_index("Voice")
+	if _voice_bus < 0:
+		AudioServer.add_bus()
+		_voice_bus = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(_voice_bus, "Voice")
+		AudioServer.set_bus_send(_voice_bus, "Master")
+	_voice.bus = "Voice"
+	_bgv.bus = "Voice"
+
+
+## Current voice loudness 0..1 (0 when silent); drives E-mote lip sync.
+func voice_level() -> float:
+	if _voice_bus < 0 or not any_voice_playing():
+		return 0.0
+	var db := AudioServer.get_bus_peak_volume_left_db(_voice_bus, 0)
+	if is_inf(db) or db < -45.0:
+		return 0.0
+	return clampf(db_to_linear(db) * 1.4, 0.0, 1.0)
 
 
 static func _peel_eog(bytes: PackedByteArray) -> PackedByteArray:

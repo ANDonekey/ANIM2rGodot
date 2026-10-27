@@ -87,6 +87,7 @@ func start_game(dir: String) -> void:
 
 
 func _process(delta: float) -> void:
+	stage.set_voice_level(audio.voice_level())
 	if vm == null or _ended:
 		return
 	vm.channel_playing = audio.any_voice_playing()
@@ -318,6 +319,7 @@ func _finish_autoplay() -> void:
 	if _stats_path != "":
 		var stats := {"events": _stat_events, "say": _stat_say,
 				"choices": _stat_choice, "effects": _stat_effects,
+				"blinks": stage.stats_blinks,
 				"ended": _ended, "shots": _shot_beats.keys()}
 		var f := FileAccess.open(_stats_path, FileAccess.WRITE)
 		f.store_string(JSON.stringify(stats))
