@@ -1,0 +1,23 @@
+# 游戏数据永不入库（版权与体积）
+*.zip
+*.7z
+*.dat
+*.psb
+*.gax
+*.eog
+*.pck
+*.mpg
+*.ogg
+*.webp
+game_full/
+assets/
+psb_out/
+
+# Godot
+.godot/
+*.import
+export_presets.cfg.local
+
+# Python
+__pycache__/
+*.pyc
