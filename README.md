@@ -16,16 +16,19 @@
 
 ## 现状（2026-10-28）
 
-逆向部分已完成核心闭环，播放器本体尚未动工：
+逆向核心闭环已完成，**播放器 MVP 已跑通**（样本包可从头播放主线）：
 
 | 模块 | 状态 |
 | --- | --- |
-| GSecretFile 加密 | 已完全攻破，Python 参考实现与格式说明齐备 |
-| sce 脚本格式（VM 规格） | 50,561 条记录全解析；对白/选项/标志/BGM/电影/E-mote 指令语义已钉死，见 `docs/sce-format.md` |
-| GFilePack 打包格式 | 已钉死（voice `.pck` 与 `psbpack.dat` 共用） |
-| PSB / E-mote 格式 | 头部加密已解（Key4 已求解）；图层树、变量评估、关键帧插值均已在 Python 评估器中验证 |
-| define.dat 的 em 姿势表 | 已解析（177 条记录、24 个变量；sce 用到的姿势 100% 覆盖） |
-| Godot 播放器 | 待开发，设计见 `docs/architecture.md` |
+| GSecretFile 加密 | 已完全攻破；GDScript 移植与 Python 参考字节一致（3 个真实文件 SHA256 对照） |
+| sce 脚本格式（VM 规格） | 50,561 条记录全解析；GDScript 解析器记录链哈希与 Python 基准一致 |
+| ScriptVM | 已实现并验证：独立 Python 模拟器与 GDScript VM 的 34,860 个规范事件流全等（一次完整通关：10,269 句对白 + 13,710 句旁白 + 44 次选项） |
+| GFilePack 打包格式 | 已钉死；加载器只读包头索引、按需取数（1.1GB 的 psbpack 不整包载入） |
+| PSB / E-mote 格式 | GDScript 解析 + 变量评估器已移植，三组姿势的部件几何与 Python 评估器逐项一致；角度存储规则（整数节包装 vs 浮点度数形）已钉死 |
+| define.dat 的 em 姿势表 | 已解析（177 条记录、24 个变量；sce 用到的姿势 100% 覆盖），GDScript 运行时直接解析原包 define |
+| Godot 播放器 | MVP 可玩：选目录→播放主线；BG/BGM/语音/E-mote 立绘/选项/存档齐全；三端（Web/Android/Linux）导出已实测出包 |
+
+构建与测试方法见 `player/README.md`。
 
 实测样本：《壁の向こうの妻の嬌声2》（GPT 汉化版数据包），与同社《マッチョ留学生》
 的主程序 RTTI 类表逐一相同（62 个类），确认为同一引擎；后者的数据文件尚未到手验证。

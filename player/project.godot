@@ -11,6 +11,11 @@ run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
+[gui]
+
+theme/default_font="res://assets/fonts/NotoSansCJK-Regular.ttc"
+theme/default_font_size=20
+
 [display]
 
 window/size/viewport_width=1280

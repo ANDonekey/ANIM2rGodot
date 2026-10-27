@@ -202,9 +202,15 @@ class Model:
             v = content.get(k, d)
             return float(v) if isinstance(v, (int, float)) else d
 
+        raw_angle = content.get('angle')
         angle = g('angle', 0.0)
-        if angle == int(angle) and 180 < angle <= 255:
+        if isinstance(raw_angle, int) and 180 < angle <= 255:
+            # proven byte-wrapped storage (int in (180, 255] means angle-256)
             angle -= 256
+        elif angle > 180 or angle <= -180:
+            # degree-form storage (e.g. float 350.0 means -10 degrees);
+            # normalize so tween lerp takes the short arc
+            angle = (angle + 180) % 360 - 180
         return {
             'src': content.get('src') if isinstance(content.get('src'), str) else '',
             'icon': str(content['icon']) if content.get('icon') is not None else None,

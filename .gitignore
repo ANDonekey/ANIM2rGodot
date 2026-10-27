@@ -24,3 +24,6 @@ __pycache__/
 
 # 导出产物
 build/
+
+# 字体文件不入库（体积）：player/assets/fonts/ 已被上面的 assets/ 规则覆盖；
+# 克隆后按 player/README.md 的说明自行放入 NotoSansCJK-Regular.ttc
