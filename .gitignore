@@ -21,3 +21,6 @@ export_presets.cfg.local
 # Python
 __pycache__/
 *.pyc
+
+# 导出产物
+build/

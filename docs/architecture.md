@@ -20,8 +20,24 @@ Python 参考实现是规格的对照基准，移植以「同输入同输出」�
 - 语言：GDScript 起步（评估器热点若不够再局部换 C#/GDExtension）。
 - 渲染：立绘每部件一个带纹理的 `Polygon2D`/`MeshInstance2D`（图集纹理共享），
   变换由评估器逐帧给出；网格变形阶段改用 PSB 的 bp 网格作顶点。
-- 数据访问：桌面用目录选择，Android 用存储权限读外部目录；游戏数据不进 `.pck`。
 - 分辨率基准：原引擎 1280×720；BG/CG 的 2048 画布只取不透明子矩形上屏。
+
+## 平台与数据包加载（三端同代码）
+
+游戏数据永不打进 `.pck`，三端差异只在"怎么拿到目录"这一层：
+
+- **桌面**：原生目录选择对话框，读外部目录。
+- **Android**：存储权限读外部目录。
+- **Web（与原生版并行开发）**：通过 JavaScriptBridge 走浏览器文件选择
+  （`webkitdirectory` 选整个游戏文件夹），文件只在用户浏览器本地读取、不上传；
+  可选 IndexedDB 持久化免重复选择。导出关闭线程支持以免依赖
+  COOP/COEP 响应头（宿主仍建议支持，如 Cloudflare Pages 的 `_headers`；
+  GitHub Pages 不支持自定义头，故不作首选宿主）。
+  内存纪律：WASM 内存上限紧，Loader 必须按需解密、禁止预解全包。
+
+Web 渲染走 Compatibility（WebGL2），与 project.godot 的既定设置一致；
+音频 Ogg 浏览器原生可播；电影 MPEG-1 在 Web 端同样缺解码器，
+候选为 pl_mpeg 编译到 WASM 或 jsmpeg，与原生版的 GDExtension 方案并行评估。
 
 ## MVP 定义（第一可玩版）
 

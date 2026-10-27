@@ -9,7 +9,8 @@
 - ✅ 运行时直接读取原始数据包：` *_sce.dat` / `*_define.dat`（GSecret 加密）、
   `cg/*.gax`、`cg/psbpack.dat`（E-mote PSB）、`voice/*.pck`、`bgm/*.eog`、`movie/*.mpg`
 - ✅ 实时渲染 E-mote 立绘（变量驱动的姿势/表情/眨眼/口型），而非预渲染烘焙
-- ✅ 多平台：Android 为首要目标，桌面 / Web 由 Godot 同一套代码导出
+- ✅ 多平台并行：Android、桌面与 **Web 版**（浏览器里选游戏文件夹直接游玩，
+  数据只在本地读取不上传）由 Godot 同一套代码导出
 - ❌ 不包含任何游戏数据（版权与体积原因）；使用者自备原版数据包
 - ❌ 不是 Ren'Py 转换器——早期的逐游戏转换路线已归档在 `reference/python/legacy-renpy/`
 
@@ -37,7 +38,8 @@
   - `architecture.md` — 播放器模块设计、MVP 范围与已知缺口
 - `reference/python/` — 逆向阶段的 Python 参考实现（即规格的代码形态，移植时的对照基准）
   - `legacy-renpy/` — 已弃用的 Ren'Py 转换路线，仅作 op 语义映射的旁证存档
-- `player/` — Godot 工程（待建，工具链约 3GB，NDK 等电影解码阶段再装）
+- `memory/` — 开发记忆：持久结论 `MEMORY.md` + 逐日日志 `devlog/`，随里程碑同步更新
+- `player/` — Godot 工程（工具链约 3GB，NDK 等电影解码阶段再装）
 
 ## 已知硬缺口
 
