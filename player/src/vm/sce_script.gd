@@ -9,7 +9,7 @@ extends RefCounted
 ##            ["imm", tag, u32 value]
 ##   'K'   -> ["stack", expr0, [[tag, sub, [params...]], ...]]
 ##   'C'   -> ["select", [[choice_value, pool_idx], ...]]
-##   'D'   -> ["textblock", [["line", a, b, seq, x] | ["speaker", idx], ...]]
+##   'D'   -> ["textblock", [["line", speaker, text, seq] | ["param", v], ...]]
 ##   'T'   -> tail appended as ["u8x5", [...]] / ["u32", v] / ["u32x4", [...]]
 
 class Rec:
@@ -233,10 +233,12 @@ func _parse_record(d: PackedByteArray, p: int, limit: int) -> Rec:
 					if c == 0xD7:
 						break
 					if c == 0xD3:
-						entries.append(["line", _u32(d, q), _u32(d, q + 4), _u16(d, q + 8), _u16(d, q + 10)])
-						q += 12
+						# interpreter: u32 speaker, u32 text, u16 seq
+						entries.append(["line", _u32(d, q), _u32(d, q + 4), _u16(d, q + 8)])
+						q += 10
 					elif c == 0xD8:
-						entries.append(["speaker", _u32(d, q)])
+						# pending render parameter for the next line
+						entries.append(["param", _u32(d, q)])
 						q += 4
 					else:
 						return null

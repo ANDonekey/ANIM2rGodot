@@ -14,6 +14,12 @@ func _canon_effect(e: Dictionary) -> String:
 		"emote_unload": return "fx|emote_unload|%d" % e["slot"]
 		"emote_load_hc": return "fx|emote_load_hc|%d|%s" % [e["slot"], e["name"]]
 		"emote_pose": return "fx|emote_pose|%d|%s|%d" % [e["slot"], e["label"], e["time"]]
+		"emote_pose_hc": return "fx|emote_pose_hc|%d|%s|%d" % [e["slot"], e["label"], e["time"]]
+		"unlock_movie": return "fx|unlock_movie|%s" % e["name"]
+		"unlock_hc": return "fx|unlock_hc|%s" % e["name"]
+		"pos_set": return "fx|pos_set|%s|%d|%d|%d" % [e["pair"], e["slot"], e["x"], e["y"]]
+		"pos_move": return "fx|pos_move|%d|%d|%d|%d" % [e["slot"], e["dx"], e["dy"], e["ms"]]
+		"chara_scale": return "fx|chara_scale|%d|%d|%d" % [e["slot"], e["raw"], e["ms"]]
 		"snapshot": return "fx|snapshot|%d" % e["slot"]
 		"paramset": return "fx|paramset|%d|%d" % [e["id"], e["value"]]
 		"select_broken": return "fx|select_broken"

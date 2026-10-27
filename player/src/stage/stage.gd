@@ -4,12 +4,19 @@ extends Node2D
 ##
 ## Approximations (v1, see docs/architecture.md): transitions 1/33/34/35
 ## render as a fade-from-black of the given duration (the reference
-## converter did the equivalent with Dissolve); slot screen positions use
-## a bottom-center anchor heuristic (the original positions characters
-## through ops 0x53/0x54/0x59 whose full semantics are still open);
-## E-mote poses are static evaluated frames (no blink/lip timelines yet).
+## converter did the equivalent with Dissolve); E-mote poses are static
+## evaluated frames (no blink/lip timelines yet).
+##
+## Slot positioning follows the original ops (pinned from the exe's
+## interpreter decompilation): 0x53/0x54 write a per-slot anchor (x, y)
+## (two engine copies, identical values in this game), 0x59 moves the
+## slot by a relative offset over a duration, 0x77 sets a per-mille
+## scale (normalized per slot: the first value seen after a load is the
+## baseline, because the original multiplies by a stage float factor
+## whose identity is unresolved). Default anchors are the SetPosInit
+## table from the script itself.
 
-const SLOT_X := {0: 640, 1: 320, 2: 960, 3: 150, 4: 1130}
+const DEFAULT_ANCHOR_X := {0: 280, 1: 426, 2: 640, 3: 852, 4: 1000}
 const HC_OFFSET := 100
 
 var pkg: GamePackage
@@ -18,6 +25,7 @@ var define: DefineTable
 var _bg: Sprite2D
 var _bg_name := ""
 var _slots: Dictionary = {}  # slot -> {root, parts_root, model, name, vars}
+var _pos: Dictionary = {}  # slot -> {ax, ay, off, sbase, smult, tw_off, tw_scale}
 var _model_cache: Dictionary = {}
 var _tex_cache: Dictionary = {}
 var _overlay: ColorRect
@@ -141,12 +149,22 @@ func emote_load(slot: int, model_name: String) -> void:
 	root.add_child(parts_root)
 	_slots[slot] = {"root": root, "parts_root": parts_root, "model": model,
 			"name": model_name, "vars": {}}
+	# A fresh model starts at its anchor (offset/scale reset; the anchor
+	# itself is scene setup and persists across loads).
+	var ps := _pos_state(slot)
+	ps["off"] = Vector2.ZERO
+	ps["sbase"] = 0
+	ps["smult"] = 1.0
 	_render_slot(slot, 0.0)
 	_layout_slots()
 
 
 func emote_load_hc(slot: int, model_name: String) -> void:
 	emote_load(slot + HC_OFFSET, model_name)
+
+
+func emote_pose_hc(slot: int, label: String, time_ms: int) -> void:
+	emote_pose(slot + HC_OFFSET, label, time_ms)
 
 
 func emote_unload(slot: int) -> void:
@@ -234,23 +252,82 @@ func _slot_bbox(st: Dictionary) -> Rect2:
 	return box
 
 
+func _pos_state(slot: int) -> Dictionary:
+	if not _pos.has(slot):
+		_pos[slot] = {"ax": float(DEFAULT_ANCHOR_X.get(slot, 640)), "ay": 0.0,
+				"off": Vector2.ZERO, "sbase": 0, "smult": 1.0,
+				"tw_off": null, "tw_scale": null}
+	return _pos[slot]
+
+
+func pos_set(_pair: String, slot: int, x: int, y: int) -> void:
+	var ps := _pos_state(slot)
+	ps["ax"] = float(x)
+	ps["ay"] = float(y)
+	_layout_slots()
+
+
+func pos_move(slot: int, dx: int, dy: int, ms: int) -> void:
+	var ps := _pos_state(slot)
+	if ps["tw_off"] != null and (ps["tw_off"] as Tween).is_valid():
+		(ps["tw_off"] as Tween).kill()
+	var from: Vector2 = ps["off"]
+	var to := from + Vector2(dx, dy)
+	if ms <= 0 or not is_inside_tree():
+		ps["off"] = to
+		_layout_slots()
+		return
+	var tw := create_tween()
+	ps["tw_off"] = tw
+	tw.tween_method(func(v: Vector2) -> void:
+			ps["off"] = v
+			_layout_slots(), from, to, ms / 1000.0)
+
+
+func chara_scale(slot: int, raw: int, ms: int) -> void:
+	var ps := _pos_state(slot)
+	if int(ps["sbase"]) == 0:
+		ps["sbase"] = raw
+		ps["smult"] = 1.0
+		_layout_slots()
+		return
+	if ps["tw_scale"] != null and (ps["tw_scale"] as Tween).is_valid():
+		(ps["tw_scale"] as Tween).kill()
+	var from: float = ps["smult"]
+	var to := raw / float(ps["sbase"])
+	if ms <= 0 or not is_inside_tree():
+		ps["smult"] = to
+		_layout_slots()
+		return
+	var tw := create_tween()
+	ps["tw_scale"] = tw
+	tw.tween_method(func(v: float) -> void:
+			ps["smult"] = v
+			_layout_slots(), from, to, ms / 1000.0)
+
+
 func _layout_slots() -> void:
-	var active: Array = _slots.keys()
-	for slot in active:
+	for slot in _slots.keys():
 		var st: Dictionary = _slots[slot]
 		var box := _slot_bbox(st)
 		if box.size == Vector2.ZERO:
 			continue
-		var cx := 640.0
-		if active.size() > 1:
-			cx = SLOT_X.get(slot % HC_OFFSET, 640)
 		# Fit the model's visible height to the stage (native model
 		# coordinates are ~2x stage height for full-body models).
 		var fit := minf(1.0, 700.0 / box.size.y) if box.size.y > 0.0 else 1.0
-		st["root"].scale = Vector2(fit, fit)
+		var cx := 640.0
+		var by := 716.0
+		var smult := 1.0
+		if slot < HC_OFFSET:
+			var ps := _pos_state(slot)
+			cx = ps["ax"] + (ps["off"] as Vector2).x
+			by = 716.0 + ps["ay"] + (ps["off"] as Vector2).y
+			smult = ps["smult"]
+		var scale := fit * smult
+		st["root"].scale = Vector2(scale, scale)
 		st["root"].position = Vector2(
-				cx - (box.position.x + box.size.x / 2.0) * fit,
-				716.0 - (box.position.y + box.size.y) * fit)
+				cx - (box.position.x + box.size.x / 2.0) * scale,
+				by - (box.position.y + box.size.y) * scale)
 
 
 # ---- save state ----
@@ -259,7 +336,13 @@ func get_state() -> Dictionary:
 	var slots := {}
 	for slot in _slots:
 		slots[str(slot)] = {"name": _slots[slot]["name"], "vars": _slots[slot]["vars"]}
-	return {"bg": _bg_name, "slots": slots}
+	var pos := {}
+	for slot in _pos:
+		var ps: Dictionary = _pos[slot]
+		pos[str(slot)] = {"ax": ps["ax"], "ay": ps["ay"],
+				"off": [(ps["off"] as Vector2).x, (ps["off"] as Vector2).y],
+				"sbase": ps["sbase"], "smult": ps["smult"]}
+	return {"bg": _bg_name, "slots": slots, "pos": pos}
 
 
 func apply_state(state: Dictionary) -> void:
@@ -272,4 +355,13 @@ func apply_state(state: Dictionary) -> void:
 		emote_load(int(slot_key), sd["name"])
 		_slots[int(slot_key)]["vars"] = sd["vars"]
 		_render_slot(int(slot_key), 0.0)
+	for slot_key in state.get("pos", {}):
+		var pd: Dictionary = state["pos"][slot_key]
+		var ps := _pos_state(int(slot_key))
+		ps["ax"] = float(pd.get("ax", ps["ax"]))
+		ps["ay"] = float(pd.get("ay", 0.0))
+		var off: Array = pd.get("off", [0, 0])
+		ps["off"] = Vector2(float(off[0]), float(off[1]))
+		ps["sbase"] = int(pd.get("sbase", 0))
+		ps["smult"] = float(pd.get("smult", 1.0))
 	_layout_slots()

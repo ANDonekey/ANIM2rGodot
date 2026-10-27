@@ -14,7 +14,13 @@ extends RefCounted
 ##   0xA9 (bank, idx)        flag <- advance latch (ClickWait)
 ##   0xA4 (bank, idx)        flag <- advance latch (wait abort)
 ##   0xA3 (ch, bank, idx)    flag <- channel playing state (SeWait)
-##   0x22/0xA5/0xA6          flag <- 0 (v1: state queries not modeled)
+##   0x22 (bank, idx)        flag <- movie_enabled (engine config byte;
+##                           gates the 0x8E/0x8F playback in movie idioms)
+##   0xA5 (bank, idx)        flag <- Ctrl key state (EfCtrlCut branches)
+##   0xA6 (bank, idx)        flag <- recollection-scene request (0 in
+##                           story boot; CheckMemory dispatches on it)
+## (0x22/0xA5/0xA6 sources pinned 2026-10-28 from the exe's interpreter
+## decompilation, FUN_004374e0 cases, plus script-side idiom analysis.)
 ## In virtual_clock mode (tests / autoplay) the clock advances 33 ms per
 ## 0xA2 and the advance latch always reads 1, mirroring the oracle.
 
@@ -32,6 +38,8 @@ var virtual_clock: bool = false
 var advance_requested: bool = false  # realtime advance latch (consumed)
 var skip_mode: bool = false
 var channel_playing: bool = false  # realtime SeWait source
+var movie_enabled: bool = true  # 0x22 source: engine movie-play config byte
+var ctrl_held: bool = false  # 0xA5 source: Ctrl key state (skip machinery)
 
 var _vclock: int = 0
 var _boot_ticks: int = 0
@@ -220,7 +228,14 @@ func run_until_event() -> Dictionary:
 			0xA3:  # channel playing state -> flag (ops: u16 ch, bank, idx)
 				_flags(ops[1])[ops[2]] = 1 if channel_playing else 0
 				pc += 1
-			0x22, 0xA5, 0xA6:  # state queries, unmodeled in v1
+			0x22:  # engine state byte: movie playback enabled (config)
+				_flags(ops[0])[ops[1]] = 1 if movie_enabled else 0
+				pc += 1
+			0xA5:  # Ctrl key state (drives the EfCtrlCut skip branches)
+				_flags(ops[0])[ops[1]] = 1 if ctrl_held else 0
+				pc += 1
+			0xA6:  # recollection-scene request register (CheckMemory dispatch);
+				# 0 during normal story boot
 				_flags(ops[0])[ops[1]] = 0
 				pc += 1
 			0xC0, 0xC8:  # Select
@@ -249,20 +264,28 @@ func run_until_event() -> Dictionary:
 			0xD5:  # narration
 				pc += 1
 				return {"kind": "narrate", "text": sce.pool_str(ops[0])}
-			0xD6:  # text block (absent in sample; entries queued as says)
+			0xD6:  # text block (absent in sample; entries queued as says).
+				# Grammar per the interpreter: 0xD3 entries carry their own
+				# speaker; 0xD8 sets a pending render parameter consumed by
+				# the next entry (sticky while it reads -1).
 				pc += 1
-				var speaker := ""
+				var pending := 0
 				for e in ops[0][1]:
-					if e[0] == "speaker":
-						speaker = sce.pool_str(e[1])
+					if e[0] == "param":
+						pending = e[1]
 					else:
-						pending_effects.append({"kind": "say_block", "speaker": speaker,
-								"text": sce.pool_str(e[2])})
+						pending_effects.append({"kind": "say_block",
+								"speaker": sce.pool_str(e[1]),
+								"text": sce.pool_str(e[2]),
+								"seq": e[3], "param": pending})
+						if pending != 4294967295:  # -1 as u32: sticky
+							pending = 0
 			0x4B:
 				_effect("image", {"name": sce.pool_str(ops[0])})
 				pc += 1
-			0x21:
-				_effect("movie", {"name": sce.pool_str(ops[0])})
+			0x21:  # register movie in the replay gallery (NOT playback;
+				# playback is 0x8E/0x8F, gated by the 0x22 config byte)
+				_effect("unlock_movie", {"name": sce.pool_str(ops[0])})
 				pc += 1
 			0x8E, 0x8F:
 				_effect("movie", {"name": sce.pool_str(ops[1])})
@@ -292,16 +315,32 @@ func run_until_event() -> Dictionary:
 				_effect("emote_load_hc", {"slot": _eval(ops[0]), "name": sce.pool_str(ops[1])})
 				pc += 1
 			0x61:
-				_effect("emote_hc2", {"slot": _eval(ops[0]), "a": ops[1], "b": ops[2]})
+				_effect("emote_pose_hc", {"slot": _eval(ops[0]),
+						"label": sce.pool_str(ops[1]), "time": ops[2]})
 				pc += 1
 			0x7C:
 				_effect("emote_pose", {"slot": _eval(ops[0]), "label": sce.pool_str(ops[1]), "time": ops[2]})
+				pc += 1
+			0x53, 0x54:  # SetPos: slot anchor pair (the engine keeps two
+				# copies, A/B; this game always writes identical values)
+				_effect("pos_set", {"pair": "a" if op == 0x53 else "b",
+						"slot": ops[0], "x": _eval(ops[1]), "y": _eval(ops[2])})
+				pc += 1
+			0x59:  # move slot by a relative offset over ms (0 = instant;
+				# the engine forces instant while advance input is held)
+				_effect("pos_move", {"slot": _eval(ops[0]), "dx": _eval(ops[1]),
+						"dy": _eval(ops[2]), "ms": _eval(ops[4])})
+				pc += 1
+			0x77:  # chara scale: raw per-mille (x a stage float factor in
+				# the original), animated over ms
+				_effect("chara_scale", {"slot": _eval(ops[0]),
+						"raw": _eval(ops[1]), "ms": _eval(ops[2])})
 				pc += 1
 			0x16:
 				_effect("snapshot", {"slot": ops[0]})
 				pc += 1
 			0x1F:
-				_effect("gallery", {"name": sce.pool_str(ops[0])})
+				_effect("unlock_hc", {"name": sce.pool_str(ops[0])})
 				pc += 1
 			0x65:
 				_effect("trans_begin")

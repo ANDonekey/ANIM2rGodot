@@ -103,13 +103,15 @@ def parse_record(d, p, limit):
                 if c == 0xd7:
                     break
                 if c == 0xd3:
+                    # interpreter (FUN_004374e0 case 0xd6): u32 speaker,
+                    # u32 text, u16 seq = 10 bytes after the tag
                     a, b, s = struct.unpack('<IIH', d[q:q + 10])
-                    x = struct.unpack('<H', d[q + 10:q + 12])[0]
-                    entries.append(('line', a, b, s, x))
-                    q += 12
+                    entries.append(('line', a, b, s))
+                    q += 10
                 elif c == 0xd8:
+                    # pending render parameter for the next line entry
                     v = struct.unpack('<I', d[q:q + 4])[0]
-                    entries.append(('speaker', v))
+                    entries.append(('param', v))
                     q += 4
                 else:
                     return None

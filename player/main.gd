@@ -81,6 +81,7 @@ func start_game(dir: String) -> void:
 	var define := DefineTable.parse(pkg.define_bytes())
 	stage.setup(pkg, define)
 	audio.setup(pkg)
+	_load_system()
 	vm = ScriptVM.new(sce)
 	_pump()
 
@@ -89,6 +90,7 @@ func _process(delta: float) -> void:
 	if vm == null or _ended:
 		return
 	vm.channel_playing = audio.any_voice_playing()
+	vm.ctrl_held = Input.is_key_pressed(KEY_CTRL)
 	if _need_pump:
 		_need_pump = false
 		_pump()
@@ -175,10 +177,51 @@ func _apply_effect(e: Dictionary) -> void:
 		"emote_pose":
 			stage.emote_pose(e["slot"], e["label"], e["time"])
 			_seen_emote = true
+		"emote_pose_hc":
+			stage.emote_pose_hc(e["slot"], e["label"], e["time"])
+			_seen_emote = true
+		"unlock_movie":
+			_unlock("movies", e["name"])
+		"unlock_hc":
+			_unlock("hc", e["name"])
+		"pos_set":
+			stage.pos_set(e["pair"], e["slot"], e["x"], e["y"])
+		"pos_move":
+			stage.pos_move(e["slot"], e["dx"], e["dy"], e["ms"])
+		"chara_scale":
+			stage.chara_scale(e["slot"], e["raw"], e["ms"])
 		"paramset":
 			stage.note_transition(e["id"], e["value"], e["tail"])
 		"snapshot":
 			_save_game("user://autosave.json")
+
+
+## Gallery unlock store (engine system data equivalent): op 0x21
+## registers movies, op 0x1F registers HC scenes; idempotent, persisted
+## to user://system.json.
+var _system: Dictionary = {"movies": {}, "hc": {}}
+
+
+func _load_system() -> void:
+	_system = {"movies": {}, "hc": {}}
+	if FileAccess.file_exists("user://system.json"):
+		var parsed: Variant = JSON.parse_string(
+				FileAccess.get_file_as_string("user://system.json"))
+		if parsed is Dictionary:
+			for kind in ["movies", "hc"]:
+				for name in parsed.get(kind, []):
+					_system[kind][name] = true
+
+
+func _unlock(kind: String, name: String) -> void:
+	if not _system[kind].has(name):
+		_system[kind][name] = true
+		var out := {}
+		for k in _system:
+			out[k] = _system[k].keys()
+		var f := FileAccess.open("user://system.json", FileAccess.WRITE)
+		if f != null:
+			f.store_string(JSON.stringify(out))
 
 
 func _advance() -> void:
