@@ -52,7 +52,10 @@ def export_model(name):
         if not w or not h or res is None:
             continue
         raw = psb.chunk_bytes(res)
-        atlas = Image.frombytes('RGBA', (w, h), raw[:w * h * 4])
+        # texture.type says "RGBA8" but bytes are stored B,G,R,A
+        # (verified against the game's CG art; straight RGBA reads
+        # give blue skin)
+        atlas = Image.frombytes('RGBA', (w, h), raw[:w * h * 4], 'raw', 'BGRA')
         atlas_name = f'atlas_{tk.replace("#", "")}.png'
         atlas.save(os.path.join(mdir, atlas_name))
         icons = tex.get('icon') or {}

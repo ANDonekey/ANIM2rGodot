@@ -40,8 +40,10 @@
   HeaderLength=44 逐位求解（69/69 文件头校验通过；值即 `psb_parse.py` 的常量）。
 - 结构可全解析：名字 trie、字符串表、chunk 表、对象树。
   参考实现：`psb_parse.py`。
-- 纹理：`source.tex`（或多页 `source.tex#NNN`）声明宽高 + `pixel: {$res: chunk}`，
-  像素为原始 RGBA8；`source.tex.icon` 给出各部件的矩形与原点。
+- 纹理：`source.tex`（或多页 `source.tex#NNN`）声明宽高 + `pixel: {$res: chunk}`；
+  `texture.type` 标称 "RGBA8"，但**字节序实测为 B,G,R,A**（按 RGBA 直读
+  肤色发蓝，与游戏 CG 原画对照后交换 R/B 才正确，2026-10-28 钉死）；
+  `source.tex.icon` 给出各部件的矩形与原点。
   批量导出器：`psb_export_all.py`（样本 69 模型 / 91 纹理页 / 9,589 部件，全量校验通过）。
 - 评估模型（渲染器核心语义，`emote_render.py` 已验证）：
   - 图层可带 `parameterize`（所属 motion 的参数表下标），按变量当前值定位时间轴

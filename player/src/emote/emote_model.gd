@@ -54,7 +54,9 @@ func base_motion() -> String:
 	return b.get("motion", "")
 
 
-## Atlas texture (RGBA8 raw chunk) for a source texture key.
+## Atlas texture for a source texture key. The chunk is labeled
+## "RGBA8" but stores bytes as B,G,R,A (verified against the game's
+## CG art: straight RGBA reads give blue skin), so R/B are swapped.
 func texture_image(tex_key: String) -> Image:
 	var tex: Dictionary = source.get(tex_key, {})
 	var td: Dictionary = tex.get("texture", {})
@@ -64,13 +66,20 @@ func texture_image(tex_key: String) -> Image:
 		return null
 	var pix: Dictionary = td.get("pixel", {})
 	var bytes := psb.chunk_bytes(int(pix.get("$res", -1)))
-	if bytes.size() < w * h * 4:
+	var total := w * h * 4
+	if bytes.size() < total:
 		var padded := PackedByteArray()
-		padded.resize(w * h * 4)
+		padded.resize(total)
 		for i in bytes.size():
 			padded[i] = bytes[i]
 		bytes = padded
-	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, bytes)
+	var swapped := PackedByteArray()
+	swapped.resize(total)
+	for px in w * h:
+		var o := px * 4
+		var v := bytes.decode_u32(o)
+		swapped.encode_u32(o, (v & 0xFF00FF00) | ((v >> 16) & 0xFF) | ((v & 0xFF) << 16))
+	return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, swapped)
 
 
 ## Icon placement info: {rect, ox, oy} with the origin unwrap applied.
