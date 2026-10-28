@@ -150,6 +150,12 @@ def build_bundles(flat_dir: str, out_dir: str, chunk_mb: int) -> int:
         out["packs"] = packs
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
+    # scenes.json (per-_SYSLABEL_ asset manifest for the player's
+    # scene prefetch) is a package-root sidecar, not a bundled file.
+    sidecar = os.path.join(flat_dir, "scenes.json")
+    if os.path.exists(sidecar):
+        shutil.copy2(sidecar, os.path.join(out_dir, "scenes.json"))
+        print("carried scenes.json sidecar")
     total = sum(files_in.values())
     print(f"done: {len(spans)} files in {len(bundles)} bundles, "
           f"{total / 1e6:.0f} MB total")

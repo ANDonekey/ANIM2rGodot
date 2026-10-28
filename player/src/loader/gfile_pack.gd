@@ -21,6 +21,31 @@ var _web_url: String = ""
 var _web_off: int = 0
 var _entry_cache: Dictionary = {}  # lowercase name -> PackedByteArray
 var _inflight: Dictionary = {}  # lowercase name -> true while fetching
+# Byte-budgeted LRU over the entry cache: a full playthrough touches
+# ~800 MB of voice data; the working set (current scene + models)
+# is far smaller than the budget.
+const ENTRY_CACHE_BUDGET := 128 * 1024 * 1024
+var _entry_lru: Array[String] = []  # least-recently-used first
+var _entry_bytes := 0
+
+
+func _entry_put(key: String, bytes: PackedByteArray) -> void:
+	if _entry_cache.has(key):
+		_entry_bytes -= (_entry_cache[key] as PackedByteArray).size()
+		_entry_lru.erase(key)
+	_entry_cache[key] = bytes
+	_entry_lru.append(key)
+	_entry_bytes += bytes.size()
+	while _entry_bytes > ENTRY_CACHE_BUDGET and _entry_lru.size() > 1:
+		var victim: String = _entry_lru.pop_front()
+		_entry_bytes -= (_entry_cache[victim] as PackedByteArray).size()
+		_entry_cache.erase(victim)
+
+
+func _entry_touch(key: String) -> void:
+	if _entry_cache.has(key):
+		_entry_lru.erase(key)
+		_entry_lru.append(key)
 
 
 static func open(path: String) -> GFilePack:
@@ -120,6 +145,7 @@ static func from_index(source: WebSource, url: String, base_off: int,
 func get_entry_async(entry_name: String) -> PackedByteArray:
 	var key := entry_name.to_lower()
 	if _entry_cache.has(key):
+		_entry_touch(key)
 		return _entry_cache[key]
 	if _web == null:
 		return get_entry(entry_name)
@@ -130,6 +156,7 @@ func get_entry_async(entry_name: String) -> PackedByteArray:
 	while _inflight.has(key):
 		await _web.get_tree().process_frame
 		if _entry_cache.has(key):
+			_entry_touch(key)
 			return _entry_cache[key]
 	_inflight[key] = true
 	var bytes: PackedByteArray = await _web.fetch_range(_web_url, _web_off + int(e[0]), int(e[1]))
@@ -138,7 +165,7 @@ func get_entry_async(entry_name: String) -> PackedByteArray:
 	# an empty result here used to silence the entry for the whole
 	# session after one transient HTTP error.
 	if not bytes.is_empty():
-		_entry_cache[key] = bytes
+		_entry_put(key, bytes)
 	return bytes
 
 
@@ -153,6 +180,7 @@ func has(name: String) -> bool:
 func get_entry(name: String) -> PackedByteArray:
 	var key := name.to_lower()
 	if _entry_cache.has(key):
+		_entry_touch(key)
 		return _entry_cache[key]
 	if _f == null:
 		return PackedByteArray()  # web mode, not fetched yet

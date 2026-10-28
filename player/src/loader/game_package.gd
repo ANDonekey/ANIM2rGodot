@@ -28,6 +28,37 @@ var _web: WebSource
 var _base: String = ""
 var _file_cache: Dictionary = {}  # relpath -> raw bytes
 var _inflight: Dictionary = {}  # relpath -> true while a fetch runs
+# The file cache is byte-budgeted LRU: BGM tracks run to 30 MB and a
+# long session would otherwise grow the wasm heap without bound.
+const FILE_CACHE_BUDGET := 256 * 1024 * 1024
+var _file_lru: Array[String] = []  # least-recently-used first
+var _file_bytes := 0
+
+
+func _cache_put(rel: String, bytes: PackedByteArray) -> void:
+	if _file_cache.has(rel):
+		_file_bytes -= (_file_cache[rel] as PackedByteArray).size()
+		_file_lru.erase(rel)
+	_file_cache[rel] = bytes
+	_file_lru.append(rel)
+	_file_bytes += bytes.size()
+	while _file_bytes > FILE_CACHE_BUDGET and _file_lru.size() > 1:
+		var victim: String = _file_lru.pop_front()
+		_file_bytes -= (_file_cache[victim] as PackedByteArray).size()
+		_file_cache.erase(victim)
+
+
+func _cache_touch(rel: String) -> void:
+	if _file_cache.has(rel):
+		_file_lru.erase(rel)
+		_file_lru.append(rel)
+
+
+func _cache_drop(rel: String) -> void:
+	if _file_cache.has(rel):
+		_file_bytes -= (_file_cache[rel] as PackedByteArray).size()
+		_file_cache.erase(rel)
+		_file_lru.erase(rel)
 # anim-webpkg/2 (bundled): every file is a span inside a bundle file.
 var _bundles: Array = []  # bundle relpaths, index = bundle id
 var _spans: Dictionary = {}  # relpath -> [bundle id, offset, size]
@@ -85,6 +116,21 @@ func open(dir: String) -> bool:
 	for nm in _list_dir(dir.path_join("movie")):
 		_movies[nm.to_lower()] = dir.path_join("movie").path_join(nm)
 	return true
+
+
+## The builder's per-scene asset manifest (scenes.json at the
+## package root): [{i, label, voices, bgv, se, images, bgm, ...}].
+## Empty when the package has none (desktop, older packages).
+func scenes_manifest() -> Array:
+	if not is_web():
+		return []
+	var bytes := await _web.fetch(_base + "scenes.json")
+	if bytes.is_empty():
+		return []
+	var parsed: Variant = JSON.parse_string(bytes.get_string_from_utf8())
+	if parsed is Dictionary:
+		return parsed.get("scenes", [])
+	return []
 
 
 func cg_count() -> int:
@@ -216,6 +262,7 @@ func _open_pack_web(rel: String, packs_idx: Dictionary = {}) -> GFilePack:
 
 func _fetch_file(rel: String) -> PackedByteArray:
 	if _file_cache.has(rel):
+		_cache_touch(rel)
 		return _file_cache[rel]
 	# Dedupe concurrent fetches of the same file: without this,
 	# a repeated request (e.g. BGM re-asserted by the script)
@@ -223,6 +270,7 @@ func _fetch_file(rel: String) -> PackedByteArray:
 	while _inflight.has(rel):
 		await _web.get_tree().process_frame
 		if _file_cache.has(rel):
+			_cache_touch(rel)
 			return _file_cache[rel]
 	_inflight[rel] = true
 	var bytes: PackedByteArray
@@ -266,11 +314,13 @@ func _fetch_file(rel: String) -> PackedByteArray:
 	# Failed fetches are NOT cached: caching an empty result used
 	# to poison the file for the rest of the session.
 	if not bytes.is_empty():
-		_file_cache[rel] = bytes
+		_cache_put(rel, bytes)
 	return bytes
 
 
 func _cached_file(rel: String) -> PackedByteArray:
+	if _file_cache.has(rel):
+		_cache_touch(rel)
 	return _file_cache.get(rel, PackedByteArray())
 
 
@@ -344,6 +394,9 @@ func ensure_movie(movie_name: String) -> String:
 		return ""
 	f.store_buffer(bytes)
 	f.close()
+	# The bytes now live on disk; keeping the in-memory copy too
+	# would double the movie's footprint for the whole session.
+	_cache_drop(rel)
 	return local
 
 

@@ -23,6 +23,11 @@ var _last_voice_by_speaker: Dictionary = {}
 var _sce: SceScript
 var _recol_table: Array = []
 var _recol_targets: Dictionary = {}  # record index -> dispatch value
+# Scene prefetch (web): scenes.json segments in record-index order.
+var _scenes_pf: Array = []
+var _pf_marks: Array = []  # [record index, scene array position]
+var _pf_scene := -1
+var _pf_done: Dictionary = {}  # scene position -> true once fetched
 var _session_live := false
 var _in_recollection := false
 var _gallery_movie := ""
@@ -275,11 +280,45 @@ func _begin_game() -> void:
 	_recol_targets = {}
 	for e in _recol_table:
 		_recol_targets[int(e["target"])] = int(e["value"])
+	if pkg.is_web():
+		_load_scenes_pf()
 	if _auto:
 		_new_vm(0)
 		_pump()
 	else:
 		_show_title()
+
+
+## Load scenes.json and translate its labels into record-index
+## marks the per-frame prefetch check can binary-walk.
+func _load_scenes_pf() -> void:
+	_scenes_pf = await pkg.scenes_manifest()
+	_pf_marks.clear()
+	for i in _scenes_pf.size():
+		var sc: Dictionary = _scenes_pf[i]
+		var lab := str(sc.get("label", ""))
+		if _sce.label_offset.has(lab):
+			var off := int(_sce.label_offset[lab])
+			if _sce.record_index.has(off):
+				_pf_marks.append([int(_sce.record_index[off]), i])
+	_pf_marks.sort_custom(func(a: Array, b: Array) -> bool:
+			return a[0] < b[0])
+
+
+## Background-fetch one scene segment's assets (web caches dedupe
+## and the LRU budgets the memory; already-played content is a hit).
+func _prefetch_scene(i: int) -> void:
+	if i < 0 or i >= _scenes_pf.size() or _pf_done.has(i):
+		return
+	_pf_done[i] = true
+	var sc: Dictionary = _scenes_pf[i]
+	for key in ["voices", "bgv", "se"]:
+		for nm in sc.get(key, []):
+			pkg.ensure_voice(str(nm))
+	for nm in sc.get("images", []):
+		pkg.ensure_image(str(nm))
+	for t in sc.get("bgm", []):
+		pkg.ensure_bgm(int(t))
 
 
 ## Fresh VM boot. request > 0 enters a recollection scene through
@@ -544,6 +583,21 @@ func _process(delta: float) -> void:
 			_persist_system()
 	if vm == null or _ended:
 		return
+	# Scene prefetch: crossing into a new _SYSLABEL_ segment fetches
+	# that segment's and the next segment's assets in the background,
+	# so lines play on arrival instead of stalling on their download.
+	if not _pf_marks.is_empty():
+		var cur := -1
+		for m in _pf_marks:
+			if vm.pc >= int(m[0]):
+				cur = int(m[1])
+			else:
+				break
+		if cur != _pf_scene:
+			_pf_scene = cur
+			if cur >= 0:
+				_prefetch_scene(cur)
+				_prefetch_scene(cur + 1)
 	vm.channel_playing = audio.any_voice_playing()
 	vm.ctrl_held = Input.is_key_pressed(KEY_CTRL)
 	if _need_pump:
