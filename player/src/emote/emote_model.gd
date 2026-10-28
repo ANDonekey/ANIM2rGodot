@@ -47,6 +47,28 @@ var fast := false
 var pre_swapped := false
 var _gid := 0
 var _clip_seq := 0
+## Phase profiling for the collect-cache design (docs/collect-cache-
+## design.md step 0): where collect()'s time actually goes.
+var stat_travel_ms := 0.0
+var stat_grid_ms := 0.0
+var stat_grid_calls := 0
+var stat_grid_hits := 0
+var stat_clips_ms := 0.0
+var stat_sorts_ms := 0.0
+var stat_parts := 0
+## Warped-grid cache (design doc, option B): a part's grid is a pure
+## function of its size/origin and the ctx segment chain; during
+## driver animation most chains are static or move sub-quantization
+## amounts per tick. Cached point arrays are READ-ONLY — consumers
+## (stage, mask code) only ever read grid points. Off by default:
+## keys are quantized (0.005 px), which the bit-parity test suite
+## must not see; the stage enables it for gameplay (like `fast`).
+var grid_cache := false
+var _grid_cache: Dictionary = {}
+var _grid_lru: Array[String] = []
+var _grid_sizes: Dictionary = {}
+var _grid_points := 0
+const GRID_CACHE_POINTS := 1500000
 var _stack: Dictionary = {}
 var _ref_cache: Dictionary = {}
 
@@ -603,11 +625,15 @@ func collect(chara: String, motion_name: String, raw_vars: Dictionary = {},
 	_stack = {}
 	var vars_ := effective_vars(raw_vars)
 	var mo: Variant = _motion(chara, motion_name)
+	var _tt := Time.get_ticks_usec()
 	if mo is Dictionary:
 		var inst := Inst.new()
 		inst.referenced = referenced_labels(chara, motion_name)
 		_travel(mo.get("layer"), chara, mo, vars_, Ctx.new(), [], inst)
+	stat_travel_ms += (Time.get_ticks_usec() - _tt) / 1000.0
+	stat_parts += _out.size()
 	# stable sort by z (Python's sort is stable)
+	_tt = Time.get_ticks_usec()
 	var decorated: Array = []
 	for i in _out.size():
 		decorated.append([_out[i]["z"], i, _out[i]])
@@ -618,7 +644,10 @@ func collect(chara: String, motion_name: String, raw_vars: Dictionary = {},
 	var out: Array = []
 	for d in decorated:
 		out.append(d[2])
+	stat_sorts_ms += (Time.get_ticks_usec() - _tt) / 1000.0
+	_tt = Time.get_ticks_usec()
 	_resolve_clips(out)
+	stat_clips_ms += (Time.get_ticks_usec() - _tt) / 1000.0
 	return out
 
 
@@ -699,6 +728,69 @@ func _stack_referenced(label_stack: Array) -> bool:
 
 
 func _grid_for(ctx: Ctx, w: float, h: float, ox: float, oy: float,
+		force_flat := false) -> Array:
+	stat_grid_calls += 1
+	var _tg := Time.get_ticks_usec()
+	var warped := false
+	if not force_flat:
+		for seg in ctx.segs:
+			if seg[3] != null:
+				warped = true
+				break
+	var res: Array
+	if not warped or not grid_cache:
+		# Flat grids are 4 chain points — cheaper than a cache key.
+		res = _grid_for_impl(ctx, w, h, ox, oy, force_flat)
+	else:
+		var key := _grid_key(ctx, w, h, ox, oy)
+		if _grid_cache.has(key):
+			stat_grid_hits += 1
+			_grid_lru.erase(key)
+			_grid_lru.append(key)
+			res = _grid_cache[key]
+		else:
+			res = _grid_for_impl(ctx, w, h, ox, oy, force_flat)
+			_grid_cache[key] = res
+			_grid_lru.append(key)
+			var npts: int = (res[0] as Array).size()
+			_grid_sizes[key] = npts
+			_grid_points += npts
+			while _grid_points > GRID_CACHE_POINTS \
+					and _grid_lru.size() > 1:
+				var victim: String = _grid_lru.pop_front()
+				_grid_points -= int(_grid_sizes.get(victim, 0))
+				_grid_sizes.erase(victim)
+				_grid_cache.erase(victim)
+	stat_grid_ms += (Time.get_ticks_usec() - _tg) / 1000.0
+	return res
+
+
+## Quantized cache key for a warped grid: segment translations and
+## matrices at 0.005 px steps, warp control data likewise — slow
+## driver motion then produces stable keys, and the geometric error
+## from a hit is below render resolution.
+func _grid_key(ctx: Ctx, w: float, h: float, ox: float, oy: float) -> String:
+	var parts := PackedStringArray()
+	parts.append(str(int(round(w * 200.0))) + "," + str(int(round(h * 200.0)))
+			+ "," + str(int(round(ox * 200.0))) + ","
+			+ str(int(round(oy * 200.0))))
+	for seg in ctx.segs:
+		var m: Array = seg[2]
+		var s := str(int(round(float(seg[0]) * 200.0))) + ","
+		s += str(int(round(float(seg[1]) * 200.0))) + ","
+		for i in 4:
+			s += str(int(round(float(m[i]) * 200.0))) + ","
+		if seg[3] == null:
+			s += "x"
+		else:
+			var warp: PackedFloat32Array = seg[3]
+			for i in warp.size():
+				s += str(int(round(warp[i] * 200.0))) + ","
+		parts.append(s)
+	return "|".join(parts)
+
+
+func _grid_for_impl(ctx: Ctx, w: float, h: float, ox: float, oy: float,
 		force_flat := false) -> Array:
 	# [points (row-major), n]: (WARP_SEG+1)^2 points when any warp is in
 	# the chain, else the 4 corners with n == 1.

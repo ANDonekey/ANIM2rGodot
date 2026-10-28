@@ -56,6 +56,30 @@ var stats_blinks := 0
 var stats_renders := 0
 var stats_render_ms := 0.0
 var stats_collect_ms := 0.0
+## Aggregated collect() phase profile across all loaded models.
+func collect_profile() -> Dictionary:
+	var t := 0.0
+	var g := 0.0
+	var gc := 0
+	var c := 0.0
+	var s := 0.0
+	var n := 0
+	var gh := 0
+	for mname in _model_cache:
+		var m: EmoteModel = _model_cache[mname]
+		t += m.stat_travel_ms
+		g += m.stat_grid_ms
+		gc += m.stat_grid_calls
+		c += m.stat_clips_ms
+		s += m.stat_sorts_ms
+		n += m.stat_parts
+		gh += m.stat_grid_hits
+	return {"travel_ms": snappedf(t, 0.1), "grid_ms": snappedf(g, 0.1),
+			"grid_calls": gc, "clips_ms": snappedf(c, 0.1),
+			"sort_ms": snappedf(s, 0.1), "parts": n,
+			"grid_hits": gh}
+
+
 var stats_mask_bakes := 0
 var stats_mask_hits := 0
 # Baked mask textures (see _masked_texture): byte-budgeted LRU.
@@ -222,6 +246,7 @@ func _model(model_name: String) -> EmoteModel:
 		return null
 	var model := EmoteModel.from_psb(Psb.parse(bytes))
 	model.fast = true
+	model.grid_cache = true
 	model.pre_swapped = pkg.pre_swapped()
 	_model_cache[model_name] = model
 	return model

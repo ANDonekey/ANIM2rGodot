@@ -564,6 +564,7 @@ func _process(delta: float) -> void:
 			dbg["fast"] = stage.stats_fast
 			dbg["mask_bakes"] = stage.stats_mask_bakes
 			dbg["mask_hits"] = stage.stats_mask_hits
+			dbg["cprof"] = stage.collect_profile()
 			dbg["fps"] = Engine.get_frames_per_second()
 			Engine.get_singleton("JavaScriptBridge").eval(
 					"window.__animAudio = "
