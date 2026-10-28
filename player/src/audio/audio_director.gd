@@ -7,6 +7,15 @@ extends Node
 
 var pkg: GamePackage
 var current_bgm := -1
+## Loop flag applied to BGM streams (the music room's repeat
+## toggle; story BGM always loops).
+var bgm_loop := true
+
+
+func set_bgm_loop(on: bool) -> void:
+	bgm_loop = on
+	if _bgm.stream is AudioStreamOggVorbis:
+		(_bgm.stream as AudioStreamOggVorbis).loop = on
 var _voice_bus := -1
 # Web mode: resources are fetched before they can play; a request
 # token per channel drops fetches that a newer call superseded.
@@ -35,6 +44,19 @@ func setup(p_pkg: GamePackage) -> void:
 
 
 ## Current voice loudness 0..1 (0 when silent); drives E-mote lip sync.
+## Channel gains (0..1 linear) driven by the VOLUME settings.
+func set_bgm_gain(f: float) -> void:
+	_bgm.volume_db = linear_to_db(maxf(f, 0.0001))
+
+
+func set_voice_gain(f: float) -> void:
+	_voice.volume_db = linear_to_db(maxf(f, 0.0001))
+
+
+func set_bgv_gain(f: float) -> void:
+	_bgv.volume_db = linear_to_db(maxf(f, 0.0001))
+
+
 func voice_level() -> float:
 	if _voice_bus < 0 or not any_voice_playing():
 		return 0.0
@@ -75,7 +97,7 @@ func play_bgm(track: int) -> void:
 	var bytes := pkg.bgm_bytes(track)
 	if bytes.is_empty():
 		return
-	_bgm.stream = _stream(bytes, "bgm_%02d" % track, true)
+	_bgm.stream = _stream(bytes, "bgm_%02d" % track, bgm_loop)
 	_bgm.play()
 	current_bgm = track
 

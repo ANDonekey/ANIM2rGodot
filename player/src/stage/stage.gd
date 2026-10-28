@@ -333,6 +333,33 @@ func emote_pose_hc(slot: int, label: String, time_ms: int) -> void:
 	emote_pose(slot + HC_OFFSET, label, time_ms)
 
 
+## Viewer (EmoteRoom) API: set one pose variable directly, effective
+## on the next drive tick.
+func emote_set_var(slot: int, var_name: String, value: float) -> void:
+	if not _slots.has(slot):
+		return
+	var st: Dictionary = _slots[slot]
+	st["vars"][var_name] = value
+	st["rvars"][var_name] = value
+	st["trans"] = null
+	st["sig"] = ""
+
+
+## Viewer API: toggle the idle drivers (blink) for a slot.
+func emote_set_idle(slot: int, on: bool) -> void:
+	if not _slots.has(slot):
+		return
+	var st: Dictionary = _slots[slot]
+	if on:
+		if st.has("_eye_stash"):
+			st["eye"] = st["_eye_stash"]
+			st.erase("_eye_stash")
+	else:
+		if not st.has("_eye_stash"):
+			st["_eye_stash"] = st["eye"]
+		st["eye"] = {}
+
+
 func emote_unload(slot: int) -> void:
 	_loading.erase(slot)
 	_pending_pose.erase(slot)
