@@ -2,9 +2,14 @@ class_name Charset
 extends RefCounted
 ## Decodes CP932 (Shift-JIS) or GBK/GB18030 byte strings to String.
 ##
-## Uses 128 KiB mapping tables in res://data/ (base64 text, generated
-## from Python's codecs — the reverse-engineering baseline), indexed by
-## (lead<<8)|trail. Base64 keeps the repo text-only for snapshot pushes.
+## Uses 128 KiB mapping tables embedded in charset_tables.gd (base64,
+## generated from Python's codecs by reference/python/
+## make_charset_tables.py — the reverse-engineering baseline), indexed
+## by (lead<<8)|trail. Embedded in code because loose data files are
+## silently dropped from exported .pck builds: Godot's editor scan
+## ignores .b64/.bin/.dat outright, and even a registered .txt copy
+## did not survive CLI export packing (verified 2026-10-28 — exported
+## builds read an empty table and garbled all decoded text).
 ## Single-byte rules follow Python: CP932 0xA1-0xDF are halfwidth katakana,
 ## everything else below 0x80 is ASCII. GB18030 4-byte sequences do not
 ## occur in the sample game's pool (verified); they decode as U+FFFD.
@@ -18,8 +23,7 @@ var _tbl: PackedByteArray
 static func load_mode(p_mode: String) -> Charset:
 	var c := Charset.new()
 	c.mode = p_mode
-	var b64 := FileAccess.get_file_as_string("res://data/%s_tbl.b64" % p_mode)
-	c._tbl = Marshalls.base64_to_raw(b64)
+	c._tbl = Marshalls.base64_to_raw(CharsetTables.table_b64(p_mode))
 	return c
 
 

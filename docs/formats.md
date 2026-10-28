@@ -50,7 +50,7 @@
     `t = (v − rangeBegin) × division / (rangeEnd − rangeBegin)`；
   - tween 关键帧对数值字段线性插值，离散字段取前帧；
   - `arm_type` / `face_type` 等选择器变量映射到 `fade_*`，选中项显示、其余隐藏；
-  - 眨眼由 `face_eye_open` 轴驱动；口型由 `face_talk` + 语音 CSV 时间轴驱动（未实现动态版）。
+  - 眨眼由 `face_eye_open` 轴驱动；口型由 `face_talk` 驱动（播放器侧动态驱动已实现：语音总线电平 → face_talk，见 architecture.md 第四轮）。
   - 三个有符号存储怪癖（坐标 int16 回绕、角度/参数端点 (180,255] 字节回绕、
     图标原点条件回绕）均已由数据对称性证明，细节在 `emote_render.py` 注释中。
 - 进阶渲染语义（2026-10-28 第四轮，全部由样本数据实测/推断，FreeMote 的
@@ -83,6 +83,47 @@
 - 未实现：`bm` 混合模式（样本中 796 例为 3、2 例为 4，语义未解）、
   色调字段（color 几乎恒为中性 0x808080FF）。物理揺れ与眨眼/口型已在
   播放器侧以驱动近似实现（见 architecture.md）。
+
+## 文本编码（sce 字符串）
+
+脚本字符串按包的字符集解码（样本为 GBK，原始日文包为 CP932）。
+解码表由 `reference/python/make_charset_tables.py` 从 Python
+编解码器生成并逐字节校验（GBK 表走 gb18030、CP932 表走 cp932：
+双字节严格解码得单字 ≤ 0xFFFF 才收录），产物内嵌于
+`src/loader/charset_tables.gd`（≤4 KiB 分片数组 + join）。
+**教训（实测）**：码表不能用 loose 数据文件随包——Godot 文件
+系统扫描忽略 .b64/.bin/.dat，改 .txt 后 CLI 导出仍不打包进
+.pck，导出包会读到空表导致全文字乱码（MVP 起潜伏四轮）。
+
+## Web 在线包格式（anim-webpkg/2，2026-10-28 第五轮）
+
+由 `reference/python/web_package_build.py <游戏目录> <输出目录>`
+预处理生成，播放器 Web 版（桌面在线模式同一代码路径）按需加载：
+
+- 除 `movie/*.mpg` 外所有文件原样复制（同盘硬链接优先）；
+- `movie/*.mpg` 以 ffmpeg 转码为 Ogg Theora/Vorbis `.ogv`
+  （libtheora q6 / libvorbis q4；样本 78 部：394 MB → 171 MB），
+  因 Godot 无 MPEG-1 解码器、Web 构建又无 GDExtension 支持，
+  原生 Theora 是 Web 端唯一可行的电影路径；
+- 产物先是 flat 形态（anim-webpkg/1）：`manifest.json` 为
+  `{format: "anim-webpkg/1", sce, define,
+  files: {相对路径: 字节数}, movies: {原名小写: ogv 相对路径}}`。
+- **部署形态为 v2 bundle 打包**（同脚本
+  `--bundle-from <flat目录> <输出目录> [--chunk-mb 256]`）：
+  浏览器游戏通用的大包形态（类 Godot .pck / Unity bundle），
+  全部文件按 256 MiB 上限顺序装入 `bundles/bundle-NNN.bin`
+  （文件不跨包切割），manifest 改为
+  `{format: "anim-webpkg/2", sce, define, bundles: [包相对路径],
+  files: {相对路径: [包序号, 包内偏移, 字节数]}, movies: {...}}`。
+  样本包：1,283 文件 / 3.83 GB → 10 个 bundle。碎文件形态在
+  HTTP 上逐个请求的连接开销不可接受（实测慢约一个数量级），
+  故 v1 只作中间产物，播放器两者都兼容；
+- 播放器据 manifest 建索引：普通文件解析为 (bundle, 偏移) 后
+  单次 Range 直读；GFilePack 内部条目不展开，包本身作为一段
+  span 落在 bundle 内（`GFilePack.open_web_span` 基址偏移），
+  仍靠两次 Range 复现头部解析、条目按需取数（响应须未被
+  gzip 改写，否则偏移失效；bundle 为 octet-stream 不会被
+  CDN 压缩，manifest 的整取不受此限）。
 
 ## define.dat 的 em 姿势表
 

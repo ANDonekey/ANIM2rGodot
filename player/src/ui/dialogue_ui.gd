@@ -7,6 +7,27 @@ extends CanvasLayer
 
 signal choice_picked(k: int)
 
+static var _font: Font
+
+
+## The bundled CJK font, applied as an explicit override on every
+## control. Relying on the project theme default font is NOT enough:
+## on the Web build the theme default silently loses the TTC's CJK
+## glyphs in TextServer (labels render missing-glyph boxes) while an
+## explicit override of the same FontFile renders correctly —
+## verified in-browser 2026-10-28 (theme label boxed, direct label
+## perfect, has_char/metrics identical in both cases).
+static func ui_font() -> Font:
+	if _font == null:
+		_font = load("res://assets/fonts/NotoSansCJK-Regular.ttc")
+	return _font
+
+
+static func apply_font(c: Control, size: int) -> void:
+	c.add_theme_font_override("font", ui_font())
+	c.add_theme_font_size_override("font_size", size)
+
+
 var _panel: PanelContainer
 var _name_label: Label
 var _text_label: Label
@@ -58,18 +79,18 @@ func _ready() -> void:
 	_panel.add_theme_stylebox_override("panel", style)
 	var vbox := VBoxContainer.new()
 	_name_label = Label.new()
-	_name_label.add_theme_font_size_override("font_size", 21)
+	apply_font(_name_label, 21)
 	_name_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.45))
 	vbox.add_child(_name_label)
 	_text_label = Label.new()
-	_text_label.add_theme_font_size_override("font_size", 21)
+	apply_font(_text_label, 21)
 	_text_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_text_label.custom_minimum_size = Vector2(0, 84)
 	_text_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 	vbox.add_child(_text_label)
 	_hint = Label.new()
 	_hint.text = "▼"
-	_hint.add_theme_font_size_override("font_size", 15)
+	apply_font(_hint, 15)
 	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	vbox.add_child(_hint)
 	_panel.add_child(vbox)
@@ -84,7 +105,7 @@ func _ready() -> void:
 	_status = Label.new()
 	_status.set_anchors_preset(Control.PRESET_CENTER_TOP)
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_status.add_theme_font_size_override("font_size", 24)
+	apply_font(_status, 24)
 	_status.offset_top = 24
 	add_child(_status)
 	hide_dialogue()
@@ -117,7 +138,7 @@ func show_choices(options: Array) -> void:
 		var b := Button.new()
 		b.text = display_text(options[k]["text"])
 		b.custom_minimum_size = Vector2(520, 44)
-		b.add_theme_font_size_override("font_size", 20)
+		apply_font(b, 20)
 		var idx := k
 		b.pressed.connect(func() -> void:
 			_menu.visible = false

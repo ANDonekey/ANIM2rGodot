@@ -81,6 +81,17 @@
 - BG/CG 是 2048×2048 画布，实际画面只在左上子矩形（样本实测 1280×720），
   上屏须按不透明 bbox 裁切。
 - Godot 编辑器在无显示的 VM 上必须 `--headless` 运行，裸跑 `--version` 会挂住。
+- **导出包会静默丢 loose 数据文件**（2026-10-28 实测）：编辑器扫描忽略
+  .b64/.bin/.dat，改 .txt 注册后 CLI 导出仍不打包；运行时按路径读的
+  数据一律内嵌代码或做正式导入资源，且导出后必须在打包产物里实测。
+- **Web 构建两坑**（2026-10-28 实测）：超长字符串字面量 `+` 拼接常量
+  会让 Emscripten 构建开机 alloc 崩溃，大文本用 ≤4KiB 分片数组 +
+  `"".join()`；项目主题默认字体在 Web TextServer 里丢 CJK 字形，
+  UI 字体一律显式 `add_theme_font_override`（`DialogueUI.apply_font`）。
+- **手写 SigV4 两坑**（2026-10-28 实测，`reference/python/r2_upload.py`）：
+  规范请求头名必须全小写（`Content-Type` 原样参与签名会让全部 PUT
+  SignatureDoesNotMatch、而 GET/HEAD 正常，冒烟测试会假通过）；
+  裸查询键 `?uploads` 的规范形式是 `uploads=`。
 
 ## 工具链（本地，已装并实测出包）
 
@@ -96,7 +107,19 @@
 
 ## 未决事项
 
-- 电影 MPEG-1 运行时解码（pl_mpeg 经 GDExtension），当前为占位跳过；
+- 电影：Web 端已由预处理转码 Ogg Theora 解决（在线包，见
+  docs/formats.md）；原生 MPEG-1 运行时解码（pl_mpeg 经
+  GDExtension）仍未做，原生包现为占位跳过；Web 构建无
+  GDExtension 支持（关线程实测），pl_mpeg 不适用于 Web；
+- Web 在线部署已上线并公网实测通过（2026-10-28）：Cloudflare
+  R2 桶 `anim2rgodot` + r2.dev 公开地址，播放器在桶根、在线包
+  在 `pkg/` 前缀；包为 anim-webpkg/2 bundle 形态（10 个 bundle
+  + manifest，桶内共 20 个对象）；Pages 因单文件 25 MiB 上限
+  （wasm 39.5 MB）不可用；R2 分片上传须单会话内完成、跨会话
+  续传的 uploadId/分片会在服务端静默丢失（见当日 devlog）；
+- 画廊/回想已实现（2026-10-28 第五轮）：标题菜单、电影画廊
+  （0x21 登记）、场景回想（0xA6 预置 → CheckMemory 分发 77 项，
+  到达进度解锁）；
 - VM 边角零碎未定：FUN_00425530 第 2 参作用、0x77 场景浮点因子身份、
   0x20 名表内容、state+6 写入方（均不影响主线游玩，见 docs/sce-format.md §7）；
 - 0x16 快照的播放器侧等价物是自有格式存档（F5/F9 + snapshot 自动存档），

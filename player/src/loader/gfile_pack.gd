@@ -11,6 +11,16 @@ var _f: FileAccess
 var names: Array[String] = []
 var _index: Dictionary = {}  # lowercase name -> [offset, size]
 
+# Web mode: the pack lives behind an HTTP URL; the header is fetched
+# with Range reads at open and entries are fetched on demand into
+# _entry_cache (sync get_entry then serves the cache only). In a v2
+# bundled package the pack is a span inside a bundle file, so every
+# read is shifted by _web_off.
+var _web: WebSource
+var _web_url: String = ""
+var _web_off: int = 0
+var _entry_cache: Dictionary = {}  # lowercase name -> PackedByteArray
+
 
 static func open(path: String) -> GFilePack:
 	var p := GFilePack.new()
@@ -39,6 +49,70 @@ static func open(path: String) -> GFilePack:
 	return p
 
 
+## Web-mode open: two Range reads (entry table, then the full header
+## up to the first blob) reproduce the desktop header parse exactly.
+static func open_web(source: WebSource, url: String) -> GFilePack:
+	return await open_web_span(source, url, 0)
+
+
+## Like open_web, but the pack starts at base_off inside the URL's
+## resource (anim-webpkg/2 bundles).
+static func open_web_span(source: WebSource, url: String, base_off: int) -> GFilePack:
+	var p := GFilePack.new()
+	p._web = source
+	p._web_url = url
+	p._web_off = base_off
+	var head: PackedByteArray = await source.fetch_range(url, base_off, 4)
+	if head.size() < 4:
+		push_error("GFilePack(web): cannot read count: " + url)
+		return null
+	var count := int(head.decode_u32(0))
+	var idx_size := 4 + 12 * count
+	var idx: PackedByteArray = await source.fetch_range(url, base_off, idx_size)
+	if idx.size() < idx_size:
+		push_error("GFilePack(web): short entry table: " + url)
+		return null
+	var entries: Array = []
+	entries.resize(count)
+	var data_start := 0x7fffffff
+	for i in count:
+		var off := int(idx.decode_u32(4 + 12 * i + 4))
+		var size := int(idx.decode_u32(4 + 12 * i + 8))
+		entries[i] = [off, size]
+		data_start = mini(data_start, off)
+	var hdr: PackedByteArray = await source.fetch_range(url, base_off, data_start)
+	if hdr.size() < data_start:
+		push_error("GFilePack(web): short header: " + url)
+		return null
+	var pos := idx_size
+	for i in count:
+		var buf := PackedByteArray()
+		while pos < hdr.size() and hdr[pos] != 0:
+			buf.append(hdr[pos])
+			pos += 1
+		pos += 1  # NUL
+		var nm := buf.get_string_from_ascii()
+		p.names.append(nm)
+		p._index[nm.to_lower()] = entries[i]
+	return p
+
+
+## Fetch one entry over HTTP into the cache (web mode); returns the
+## bytes. Native mode just defers to get_entry.
+func get_entry_async(entry_name: String) -> PackedByteArray:
+	var key := entry_name.to_lower()
+	if _entry_cache.has(key):
+		return _entry_cache[key]
+	if _web == null:
+		return get_entry(entry_name)
+	var e: Variant = _index.get(key)
+	if e == null:
+		return PackedByteArray()
+	var bytes: PackedByteArray = await _web.fetch_range(_web_url, _web_off + int(e[0]), int(e[1]))
+	_entry_cache[key] = bytes
+	return bytes
+
+
 func entry_count() -> int:
 	return names.size()
 
@@ -48,7 +122,12 @@ func has(name: String) -> bool:
 
 
 func get_entry(name: String) -> PackedByteArray:
-	var e: Variant = _index.get(name.to_lower())
+	var key := name.to_lower()
+	if _entry_cache.has(key):
+		return _entry_cache[key]
+	if _f == null:
+		return PackedByteArray()  # web mode, not fetched yet
+	var e: Variant = _index.get(key)
 	if e == null:
 		return PackedByteArray()
 	_f.seek(e[0])

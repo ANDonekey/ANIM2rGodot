@@ -8,6 +8,11 @@ extends Node
 var pkg: GamePackage
 var current_bgm := -1
 var _voice_bus := -1
+# Web mode: resources are fetched before they can play; a request
+# token per channel drops fetches that a newer call superseded.
+var _bgm_req := 0
+var _voice_req := 0
+var _bgv_req := 0
 
 @onready var _bgm: AudioStreamPlayer = $BGM
 @onready var _voice: AudioStreamPlayer = $Voice
@@ -61,6 +66,12 @@ func _stream(bytes: PackedByteArray, cache_key: String, loop: bool) -> AudioStre
 func play_bgm(track: int) -> void:
 	if track == current_bgm and _bgm.playing:
 		return
+	_bgm_req += 1
+	var token := _bgm_req
+	if pkg.is_web() and pkg.bgm_bytes(track).is_empty():
+		await pkg.ensure_bgm(track)
+		if token != _bgm_req:
+			return
 	var bytes := pkg.bgm_bytes(track)
 	if bytes.is_empty():
 		return
@@ -70,6 +81,7 @@ func play_bgm(track: int) -> void:
 
 
 func stop_bgm() -> void:
+	_bgm_req += 1
 	_bgm.stop()
 	current_bgm = -1
 
@@ -79,6 +91,12 @@ func fade_bgm(_ms: int) -> void:
 
 
 func play_voice(voice_name: String) -> void:
+	_voice_req += 1
+	var token := _voice_req
+	if pkg.is_web() and pkg.voice_bytes(voice_name).is_empty():
+		await pkg.ensure_voice(voice_name)
+		if token != _voice_req:
+			return
 	var bytes := pkg.voice_bytes(voice_name)
 	if bytes.is_empty():
 		return
@@ -87,10 +105,17 @@ func play_voice(voice_name: String) -> void:
 
 
 func stop_voice() -> void:
+	_voice_req += 1
 	_voice.stop()
 
 
 func play_bgv(voice_name: String) -> void:
+	_bgv_req += 1
+	var token := _bgv_req
+	if pkg.is_web() and pkg.voice_bytes(voice_name).is_empty():
+		await pkg.ensure_voice(voice_name)
+		if token != _bgv_req:
+			return
 	var bytes := pkg.voice_bytes(voice_name)
 	if bytes.is_empty():
 		return
@@ -99,6 +124,7 @@ func play_bgv(voice_name: String) -> void:
 
 
 func stop_bgv() -> void:
+	_bgv_req += 1
 	_bgv.stop()
 
 

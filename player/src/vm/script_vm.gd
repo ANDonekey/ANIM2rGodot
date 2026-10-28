@@ -40,6 +40,13 @@ var skip_mode: bool = false
 var channel_playing: bool = false  # realtime SeWait source
 var movie_enabled: bool = true  # 0x22 source: engine movie-play config byte
 var ctrl_held: bool = false  # 0xA5 source: Ctrl key state (skip machinery)
+var recollection_request: int = 0  # 0xA6 source: gallery scene request
+# Gallery reach tracking: Main injects the CheckMemory dispatch
+# targets; every record the VM actually executes is checked against
+# the set (per-instruction, so dispatch landings are never missed)
+# and hits accumulate here for Main to drain into the unlock store.
+var watch_targets: Dictionary = {}  # record index -> dispatch value
+var visited_scenes: Dictionary = {}  # dispatch value -> true
 
 var _vclock: int = 0
 var _boot_ticks: int = 0
@@ -154,6 +161,8 @@ func run_until_event() -> Dictionary:
 		steps += 1
 		if steps > budget:
 			return {"kind": "stall", "pc": pc}
+		if not watch_targets.is_empty() and watch_targets.has(pc):
+			visited_scenes[watch_targets[pc]] = true
 		var r: SceScript.Rec = sce.records[pc]
 		var op := r.op
 		var ops := r.ops
@@ -234,9 +243,12 @@ func run_until_event() -> Dictionary:
 			0xA5:  # Ctrl key state (drives the EfCtrlCut skip branches)
 				_flags(ops[0])[ops[1]] = 1 if ctrl_held else 0
 				pc += 1
-			0xA6:  # recollection-scene request register (CheckMemory dispatch);
-				# 0 during normal story boot
-				_flags(ops[0])[ops[1]] = 0
+			0xA6:  # recollection-scene request register (CheckMemory
+				# dispatch). The gallery sets recollection_request before
+				# boot; the read consumes it (later reads see 0, as a
+				# fresh story boot must).
+				_flags(ops[0])[ops[1]] = recollection_request
+				recollection_request = 0
 				pc += 1
 			0xC0, 0xC8:  # Select
 				var pairs: Array = ops[0][1]

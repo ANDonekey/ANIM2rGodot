@@ -39,9 +39,18 @@ var _icon_opaque_cache: Dictionary = {}
 var _overlay: ColorRect
 var _movie_panel: PanelContainer
 var _movie_label: Label
+var _video: VideoStreamPlayer
 var _last_change := false
 var _voice_level := 0.0
 var _time := 0.0
+# Web mode: resources arrive asynchronously. Tokens drop superseded
+# fetches; poses addressed to a still-loading slot are buffered and
+# the latest one is applied when the model lands.
+var _img_req := 0
+var _movie_req := 0
+var _load_seq := 0
+var _loading: Dictionary = {}  # slot -> token
+var _pending_pose: Dictionary = {}  # slot -> [label, time_ms]
 
 var stats_blinks := 0
 
@@ -66,8 +75,15 @@ func _ready() -> void:
 	_movie_panel.visible = false
 	_movie_label = Label.new()
 	_movie_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	DialogueUI.apply_font(_movie_label, 20)
 	_movie_panel.add_child(_movie_label)
 	layer.add_child(_movie_panel)
+	_video = VideoStreamPlayer.new()
+	_video.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_video.expand = true
+	_video.visible = false
+	_video.finished.connect(func() -> void: _video.visible = false)
+	layer.add_child(_video)
 
 
 func setup(p_pkg: GamePackage, p_define: DefineTable) -> void:
@@ -82,7 +98,14 @@ func set_voice_level(v: float) -> void:
 # ---- background / CG ----
 
 func show_image(image_name: String) -> void:
+	_img_req += 1
+	var token := _img_req
 	var bytes := pkg.image_bytes(image_name)
+	if bytes.is_empty() and pkg.is_web():
+		await pkg.ensure_image(image_name)
+		if token != _img_req:
+			return
+		bytes = pkg.image_bytes(image_name)
 	if bytes.is_empty():
 		push_warning("Stage: image not found: " + image_name)
 		return
@@ -127,6 +150,53 @@ func movie_placeholder(movie_name: String) -> void:
 	var tw := create_tween()
 	tw.tween_interval(1.5)
 	tw.tween_callback(func() -> void: _movie_panel.visible = false)
+
+
+## Movie entry point: web packages carry a transcoded Theora version
+## of every movie, which Godot plays natively — download it and play
+## fullscreen. Native packages still have only MPEG-1, so they keep
+## the placeholder until the pl_mpeg extension lands.
+func play_movie(movie_name: String) -> void:
+	if pkg != null and pkg.is_web() and pkg.movie_ogv_rel(movie_name) != "":
+		_movie_req += 1
+		var token := _movie_req
+		var path: String = await pkg.ensure_movie(movie_name)
+		if token != _movie_req or path == "":
+			return
+		var stream := VideoStreamTheora.new()
+		stream.file = path
+		_video.stream = stream
+		_video.visible = true
+		_video.play()
+		return
+	movie_placeholder(movie_name)
+
+
+func stop_movie() -> void:
+	_movie_req += 1
+	if _video.visible:
+		_video.stop()
+		_video.visible = false
+
+
+## True while a movie (real video or the native placeholder panel)
+## is on screen; the gallery uses it to detect playback end.
+func movie_playing() -> bool:
+	return _video.visible or _movie_panel.visible
+
+
+## Reset the stage to a blank slate for a fresh VM boot (story
+## restart or a recollection entry): movies off, background cleared,
+## every loaded E-mote slot unloaded. Model/texture caches stay —
+## they are content-addressed and reused across boots.
+func clear_stage() -> void:
+	stop_movie()
+	_movie_panel.visible = false
+	_bg.texture = null
+	_bg_name = ""
+	for slot in _slots.keys():
+		emote_unload(slot)
+	_pos.clear()
 
 
 # ---- E-mote slots ----
@@ -196,6 +266,24 @@ func _icon_fully_opaque(st: Dictionary, tex_key: String, icon: String, rect: Rec
 
 func emote_load(slot: int, model_name: String) -> void:
 	emote_unload(slot)
+	if not _model_cache.has(model_name) and pkg.is_web() \
+			and pkg.psb_bytes(model_name).is_empty():
+		# Web mode and the model is not fetched yet: fetch it, then
+		# load for real; poses arriving meanwhile are buffered.
+		_load_seq += 1
+		var token := _load_seq
+		_loading[slot] = token
+		await pkg.ensure_psb(model_name)
+		if _loading.get(slot, -1) != token:
+			return  # superseded or unloaded while fetching
+		_loading.erase(slot)
+		# Capture the buffered pose BEFORE the recursive load: its
+		# emote_unload() call clears the buffer.
+		var pp: Variant = _pending_pose.get(slot)
+		emote_load(slot, model_name)
+		if pp != null:
+			emote_pose(slot, pp[0], pp[1])
+		return
 	var model := _model(model_name)
 	if model == null:
 		return
@@ -246,6 +334,8 @@ func emote_pose_hc(slot: int, label: String, time_ms: int) -> void:
 
 
 func emote_unload(slot: int) -> void:
+	_loading.erase(slot)
+	_pending_pose.erase(slot)
 	if _slots.has(slot):
 		_slots[slot]["root"].queue_free()
 		_slots.erase(slot)
@@ -254,6 +344,8 @@ func emote_unload(slot: int) -> void:
 
 func emote_pose(slot: int, label: String, time_ms: int) -> void:
 	if not _slots.has(slot):
+		if _loading.has(slot):
+			_pending_pose[slot] = [label, time_ms]
 		return
 	var pose := define.pose_vars(label)
 	if pose.is_empty():

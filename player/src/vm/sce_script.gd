@@ -263,3 +263,60 @@ func pool_str(idx: int) -> String:
 	var s := charset.decode(_pool[idx])
 	_pool_cache[idx] = s
 	return s
+
+
+## Recollection (scene replay) support. The script's CheckMemory
+## subroutine reads the engine's scene-request register (op 0xA6)
+## into a local flag and dispatches through a chain of JumpIfEq
+## (op 0x27) records: value -> code offset. Value 0 is the normal
+## story start; values 1..N are scene entries in story order
+## (targets are monotonic — verified on the sample script, where the
+## chain has 77 entries). Returns [{value, target(record index)}];
+## empty when the script has no CheckMemory dispatch.
+func recollection_table() -> Array:
+	var out: Array = []
+	if not label_offset.has("CheckMemory"):
+		return out
+	var cm_off: int = label_offset["CheckMemory"]
+	if not record_index.has(cm_off):
+		return out
+	var i: int = record_index[cm_off] + 1
+	# Expect the 0xA6 register read first.
+	if i < records.size() and records[i].op == 0xA6:
+		i += 1
+	while i < records.size() and records[i].op == 0x27:
+		var ops: Array = records[i].ops
+		if ops.size() == 4 and ops[2] is Array and ops[2][0] == "imm" \
+				and record_index.has(ops[3]):
+			out.append({"value": int(ops[2][2]),
+					"target": int(record_index[ops[3]])})
+		i += 1
+	return out
+
+
+## First spoken/narrated line at or after a record index — used as a
+## gallery caption for a recollection entry. Returns
+## {speaker, text} or {} when no line exists before the next label.
+func preview_line(from_record: int) -> Dictionary:
+	var i := from_record
+	while i < records.size() and i < from_record + 4000:
+		var r: Rec = records[i]
+		match r.op:
+			0x0A:  # label: stop at the NEXT segment's boundary
+				if i > from_record:
+					break
+			0xD2:
+				return {"speaker": pool_str(r.ops[1]),
+						"text": pool_str(r.ops[2])}
+			0xD3, 0xD4:
+				return {"speaker": pool_str(r.ops[0]),
+						"text": pool_str(r.ops[1])}
+			0xD5:
+				return {"speaker": "", "text": pool_str(r.ops[0])}
+			0xD6:
+				for e in r.ops[0][1]:
+					if e[0] == "line":
+						return {"speaker": pool_str(e[1]),
+								"text": pool_str(e[2])}
+		i += 1
+	return {}

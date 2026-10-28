@@ -20,6 +20,21 @@ var _voice_pack: GFilePack
 var _sce_cache: PackedByteArray
 var _define_cache: PackedByteArray
 
+# Web mode (online package): indexes hold package-relative paths and
+# every resource is fetched over HTTP into _file_cache on first use
+# (the ensure_* functions) or at open (sce/define). Sync getters then
+# read the caches, so callers above this layer do not change.
+var _web: WebSource
+var _base: String = ""
+var _file_cache: Dictionary = {}  # relpath -> raw bytes
+# anim-webpkg/2 (bundled): every file is a span inside a bundle file.
+var _bundles: Array = []  # bundle relpaths, index = bundle id
+var _spans: Dictionary = {}  # relpath -> [bundle id, offset, size]
+
+
+func is_web() -> bool:
+	return _web != null
+
 
 static func _list_dir(path: String) -> Array[String]:
 	var out: Array[String] = []
@@ -83,7 +98,10 @@ func movie_count() -> int:
 
 
 func _decrypted(path: String) -> PackedByteArray:
-	var raw := FileAccess.get_file_as_bytes(path)
+	return _decrypt_bytes(FileAccess.get_file_as_bytes(path))
+
+
+static func _decrypt_bytes(raw: PackedByteArray) -> PackedByteArray:
 	if raw.is_empty():
 		return raw
 	if GSecret.is_gsecret(raw):
@@ -91,6 +109,148 @@ func _decrypted(path: String) -> PackedByteArray:
 	# "Fake header + plaintext" variant (patched localizations):
 	# same 20-byte header size, body already plaintext.
 	return raw.slice(20)
+
+
+## Open an online (preprocessed) package: base_url points at the
+## package root that serves manifest.json (see web_package_build.py).
+func open_web(source: WebSource, base_url: String) -> bool:
+	_web = source
+	_base = base_url
+	if not _base.ends_with("/"):
+		_base += "/"
+	root = _base
+	var mbytes: PackedByteArray = await source.fetch(_base + "manifest.json")
+	var parsed: Variant = JSON.parse_string(mbytes.get_string_from_utf8())
+	if not (parsed is Dictionary) or parsed.get("format", "") not in ["anim-webpkg/1", "anim-webpkg/2"]:
+		push_error("GamePackage(web): bad manifest at " + _base)
+		return false
+	var files: Dictionary = parsed["files"]
+	if parsed["format"] == "anim-webpkg/2":
+		_bundles = parsed["bundles"]
+		for rel_v in files:
+			_spans[rel_v] = files[rel_v]
+	sce_name = parsed.get("sce", "")
+	define_name = parsed.get("define", "")
+	if sce_name == "":
+		push_error("GamePackage(web): manifest has no sce")
+		return false
+	var psb_rel := ""
+	var voice_rel := ""
+	for rel_v in files:
+		var rel: String = rel_v
+		var low: String = rel.to_lower()
+		if low.begins_with("cg/") and low.ends_with(".gax"):
+			_cg[rel.get_file().get_basename().to_lower()] = rel
+		elif low == "cg/psbpack.dat":
+			psb_rel = rel
+		elif low.begins_with("voice/") and low.ends_with(".pck"):
+			voice_rel = rel
+		elif low.begins_with("bgm/") and low.ends_with(".eog"):
+			_bgm[int(rel.get_file().get_basename())] = rel
+	var movies: Dictionary = parsed.get("movies", {})
+	for orig in movies:
+		_movies[orig.to_lower()] = movies[orig]
+	if psb_rel != "":
+		_psb_pack = await _open_pack_web(psb_rel)
+	if voice_rel != "":
+		_voice_pack = await _open_pack_web(voice_rel)
+	_sce_cache = _decrypt_bytes(await _fetch_file(sce_name))
+	if define_name != "":
+		_define_cache = _decrypt_bytes(await _fetch_file(define_name))
+	return not _sce_cache.is_empty()
+
+
+## Open a GFilePack that lives in the web package: as a loose file
+## (v1) or as a span inside a bundle (v2).
+func _open_pack_web(rel: String) -> GFilePack:
+	if _spans.has(rel):
+		var s: Array = _spans[rel]
+		return await GFilePack.open_web_span(
+				_web, _base + _bundles[int(s[0])], int(s[1]))
+	return await GFilePack.open_web(_web, _base + rel)
+
+
+func _fetch_file(rel: String) -> PackedByteArray:
+	if _file_cache.has(rel):
+		return _file_cache[rel]
+	var bytes: PackedByteArray
+	if _spans.has(rel):
+		var s: Array = _spans[rel]
+		bytes = await _web.fetch_range(
+				_base + _bundles[int(s[0])], int(s[1]), int(s[2]))
+	else:
+		bytes = await _web.fetch(_base + rel)
+	_file_cache[rel] = bytes
+	return bytes
+
+
+func _cached_file(rel: String) -> PackedByteArray:
+	return _file_cache.get(rel, PackedByteArray())
+
+
+## Prefetch one cg image so image_bytes() can serve it synchronously.
+func ensure_image(image_name: String) -> void:
+	if not is_web():
+		return
+	var rel: Variant = _cg.get(image_name.get_basename().to_lower())
+	if rel != null:
+		await _fetch_file(rel)
+
+
+func ensure_bgm(track: int) -> void:
+	if not is_web():
+		return
+	var rel: Variant = _bgm.get(track)
+	if rel != null:
+		await _fetch_file(rel)
+
+
+func _pack_entry_name(pack: GFilePack, entry_name: String, ext: String) -> String:
+	var nm := entry_name.get_file()
+	if pack.has(nm):
+		return nm
+	return nm + ext
+
+
+func ensure_psb(model_name: String) -> void:
+	if not is_web() or _psb_pack == null:
+		return
+	await _psb_pack.get_entry_async(_pack_entry_name(_psb_pack, model_name, ".psb"))
+
+
+func ensure_voice(voice_name: String) -> void:
+	if not is_web() or _voice_pack == null:
+		return
+	await _voice_pack.get_entry_async(_pack_entry_name(_voice_pack, voice_name, ".eog"))
+
+
+## Transcoded (.ogv) path for a movie in web mode, "" when the package
+## has no transcoded version of it.
+func movie_ogv_rel(movie_name: String) -> String:
+	var p: Variant = _movies.get(movie_name.get_file().to_lower())
+	return p if p != null and is_web() else ""
+
+
+## Download a transcoded movie into user:// and return its local path
+## (VideoStreamTheora plays from files, not buffers). "" on failure.
+func ensure_movie(movie_name: String) -> String:
+	var rel := movie_ogv_rel(movie_name)
+	if rel == "":
+		return ""
+	var dir := "user://movie_cache"
+	DirAccess.make_dir_recursive_absolute(dir)
+	var local := dir + "/" + rel.get_file()
+	if FileAccess.file_exists(local):
+		return local
+	var bytes: PackedByteArray = await _fetch_file(rel)
+	if bytes.is_empty():
+		return ""
+	var f := FileAccess.open(local, FileAccess.WRITE)
+	if f == null:
+		return ""
+	f.store_buffer(bytes)
+	f.close()
+	return local
 
 
 func sce_bytes() -> PackedByteArray:
@@ -111,6 +271,8 @@ func image_bytes(image_name: String) -> PackedByteArray:
 	var p: Variant = _cg.get(image_name.get_basename().to_lower())
 	if p == null:
 		return PackedByteArray()
+	if is_web():
+		return _decrypt_bytes(_cached_file(p))
 	return _decrypted(p)
 
 
@@ -119,10 +281,7 @@ func image_bytes(image_name: String) -> PackedByteArray:
 func psb_bytes(model_name: String) -> PackedByteArray:
 	if _psb_pack == null:
 		return PackedByteArray()
-	var nm := model_name.get_file()
-	if _psb_pack.has(nm):
-		return _psb_pack.get_entry(nm)
-	return _psb_pack.get_entry(nm + ".psb")
+	return _psb_pack.get_entry(_pack_entry_name(_psb_pack, model_name, ".psb"))
 
 
 ## Raw (still CRM-wrapped) voice entry bytes; the audio layer peels the
@@ -130,10 +289,7 @@ func psb_bytes(model_name: String) -> PackedByteArray:
 func voice_bytes(voice_name: String) -> PackedByteArray:
 	if _voice_pack == null:
 		return PackedByteArray()
-	var nm := voice_name.get_file()
-	if _voice_pack.has(nm):
-		return _voice_pack.get_entry(nm)
-	return _voice_pack.get_entry(nm + ".eog")
+	return _voice_pack.get_entry(_pack_entry_name(_voice_pack, voice_name, ".eog"))
 
 
 ## Raw .eog bytes for a BGM track number (bgm/NN.eog).
@@ -141,6 +297,8 @@ func bgm_bytes(track: int) -> PackedByteArray:
 	var p: Variant = _bgm.get(track)
 	if p == null:
 		return PackedByteArray()
+	if is_web():
+		return _cached_file(p)
 	return FileAccess.get_file_as_bytes(p)
 
 

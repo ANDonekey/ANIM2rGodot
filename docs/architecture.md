@@ -12,8 +12,8 @@ Python 参考实现是规格的对照基准，移植以「同输入同输出」�
 | EmoteRenderer | PSB 解析 + 变量评估 → 每帧生成图层四边形列；姿势切换对变量字典做插值过渡；眨眼/口型时间轴驱动 | `psb_parse.py`、`emote_render.py`、`define_extract.py` |
 | Stage | BG/CG 图层、转场（ParamSet id 1/33/34/35/40/71 的近似或 shader 实现）、HC 全屏场景 | `sce-format.md` §4/§4.1 |
 | Audio | BGM（`.eog` 剥头直播、循环）、语音（`.pck` 按名取）、BGV 音频（0x88 通道）；`0xAC` 是连动外设参数（非音频，见 sce-format.md §4），播放器仅记录 | 同上 |
-| Video | MPEG-1 播放：pl_mpeg 经 GDExtension 接入；接入前先做跳过占位 | — |
-| UI/系统 | 对话框、存档（先实现播放器自有存档；原引擎 500 槽快照语义后补）、回想、画廊、设置 | — |
+| Video | 原生：MPEG-1 待 pl_mpeg 经 GDExtension 接入，现为跳过占位；Web：预处理转码 Ogg Theora、原生 VideoStreamPlayer 播放（见 formats.md 的 Web 在线包一节） | — |
+| UI/系统 | 对话框、播放器自有存档（F5/F9；原引擎 500 槽快照语义后补）；标题菜单 + 电影画廊（0x21 解锁登记）+ 场景回想（0xA6 请求寄存器 → 脚本 CheckMemory 分发、到达进度解锁）已实现（2026-10-28 第五轮） | — |
 
 ## Godot 侧落点
 
@@ -28,16 +28,25 @@ Python 参考实现是规格的对照基准，移植以「同输入同输出」�
 
 - **桌面**：原生目录选择对话框，读外部目录。
 - **Android**：存储权限读外部目录。
-- **Web（与原生版并行开发）**：通过 JavaScriptBridge 走浏览器文件选择
-  （`webkitdirectory` 选整个游戏文件夹），文件只在用户浏览器本地读取、不上传；
-  可选 IndexedDB 持久化免重复选择。导出关闭线程支持以免依赖
-  COOP/COEP 响应头（宿主仍建议支持，如 Cloudflare Pages 的 `_headers`；
-  GitHub Pages 不支持自定义头，故不作首选宿主）。
-  内存纪律：WASM 内存上限紧，Loader 必须按需解密、禁止预解全包。
+- **Web（2026-10-28 第五轮定版：只做在线载入，本地文件夹载入推迟）**：
+  数据包先经 `reference/python/web_package_build.py` 预处理为在线包
+  （格式见 formats.md）：除电影转码外全部原样，部署形态再打包为
+  少数大 bundle 文件（anim-webpkg/2），`manifest.json` 索引每个
+  文件所在的 bundle 与偏移。播放器以页面 URL 的同目录 `pkg/` 为包基址
+  （`?pkg=` 可改），`WebSource` 按需 HTTP 拉取：sce/define 开包时
+  整取解密；GFilePack 只用两次 Range 请求复现头部解析、条目按需
+  Range 取并缓存；图片/模型/音频先查缓存未命中再拉；电影整取
+  `.ogv` 到 `user://movie_cache/` 后本地播放。Range 语义要求响应
+  不被 gzip 改写（请求侧关 gzip）。导出关闭线程以免依赖 COOP/COEP，
+  代价是 **Web 构建无 GDExtension 支持**（引擎启动日志实测），
+  故 pl_mpeg 路线在 Web 上永久不可行，Web 电影靠预处理转码解决。
+  托管实测约束：`index.wasm` 约 39.5 MB 超过 Cloudflare Pages
+  单文件 25 MiB 上限，Pages 不可用；现部署于 Cloudflare R2 +
+  r2.dev 公开地址（播放器在桶根、包在 `pkg/` 前缀下）。
+  内存纪律不变：按需解密、禁止预解全包。
 
 Web 渲染走 Compatibility（WebGL2），与 project.godot 的既定设置一致；
-音频 Ogg 浏览器原生可播；电影 MPEG-1 在 Web 端同样缺解码器，
-候选为 pl_mpeg 编译到 WASM 或 jsmpeg，与原生版的 GDExtension 方案并行评估。
+音频 Ogg 浏览器原生可播。
 
 ## MVP 定义（第一可玩版）—— 2026-10-28 已达成
 
@@ -59,13 +68,36 @@ Web 渲染走 Compatibility（WebGL2），与 project.godot 的既定设置一�
 | 0xA9 | (bank, idx) | 标志 ← 推进闩锁（ClickWait 靠它等点击） |
 | 0xA4 | (bank, idx) | 标志 ← 推进闩锁（等待可被点击打断） |
 | 0xA3 | (ch, bank, idx) | 标志 ← 声音通道播放状态（SeWait 等声效结束） |
-| 0x22 / 0xA5 / 0xA6 | (bank, idx) | 状态查询类，v1 置 0（分支只通向可选电影变体等次要路径） |
+| 0x22 | (bank, idx) | 标志 ← 电影门控状态字节（播放器 `movie_enabled`，默认开） |
+| 0xA5 | (bank, idx) | 标志 ← Ctrl 键状态（实时模式读 Input；虚拟钟恒 0） |
+| 0xA6 | (bank, idx) | 标志 ← 回想场景请求寄存器：画廊进入回想时预置场景号，脚本开头 CheckMemory 读它分发进对应场景；VM 读一次后清零，正常游玩恒 0 |
 
 实时模式下 VM 在等待轮询中快速让出（小步预算 + 实时钟），测试/自动播放用虚拟钟
 （每次 0xA2 +33ms、推进闩锁恒 1），与 Python 模拟器的约定一致。
 
 ## 后续阶段
 
+- （2026-10-28 第五轮已完成）Web 在线载入 + 画廊/回想 + 部署：
+  在线包预处理与 Range 按需加载（见上）；标题菜单、电影画廊
+  （0x21 登记驱动）、场景回想（CheckMemory 分发表 77 项、回想
+  场景 76 个，条目以「剧情实际执行到该场景入口记录」解锁——
+  VM 逐指令监视分发目标、主循环排空入 system.json；标题取
+  入口后首句对白作说明）；Esc 导航（游戏中 Esc 开菜单、回想
+  结束回标题）。同轮修掉自 MVP 起潜伏的**导出包文字乱码**：
+  码表原以 loose 文件随包，Godot 对 .b64/.bin/.dat 不注册、
+  改 .txt 注册后 CLI 导出仍不打包，导出包内码表恒空——改为
+  生成器从 Python 编解码器逐字节复现并内嵌代码
+  （`charset_tables.gd`，分片数组 + join；超长字面量拼接会让
+  Web 构建开机崩溃，实测）。另 Web 主题默认字体在 TextServer
+  丢 CJK 字形，所有 UI 控件一律 `DialogueUI.apply_font()` 显式
+  挂字体（含画廊）。部署：R2 桶 + r2.dev（见上）；在线包按
+  用户意见改为 bundle 大包形态（anim-webpkg/2，见 formats.md），
+  桶内最终 20 个对象（播放器 9 + manifest + 10 个 bundle），
+  公网地址经本机 Chromium 整局实跑验证（233 事件、到达选项、
+  截图中文正常、控制台零错误）。回归：六组
+  测试全过（loader/parser/vm 35923 事件/emote/recollection/
+  movie）+ 画廊冒烟（标题/列表/回想/Esc/到达自动标记）+
+  本机 Chromium 在线包整局实跑（选项处截图中文正常）。
 - （2026-10-28 第四轮已完成）E-mote 进阶渲染：网格变形（mesh `bp`
   按三次 Bezier 曲面求值、两实现 WARP_SEG=5 细分、tween 逐分量插值）、
   模板遮罩（stencilType 5 语义实测钉死：子树按同实例内指定图层部件的
@@ -75,8 +107,10 @@ Web 渲染走 Compatibility（WebGL2），与 project.godot 的既定设置一�
   face_talk）、头发/胸部/部件控制的弹簧物理（layer_offsets 钩子）；
   驱动重绘带签名检测 + 0.05s 节流。语义细节见 formats.md；
 - ParamSet 特殊转场（条带/放射/色淡）；
-- pl_mpeg 接入（需装 NDK 做 GDExtension）；
-- 原引擎存档快照（`0x16`）、画廊解锁（`0x1F`）等系统语义补全；
+- pl_mpeg 接入原生电影播放（需装 NDK 做 GDExtension；Web 不适用）；
+- 原引擎存档快照（`0x16`）语义补全（画廊解锁 `0x1F` 登记已接通，
+  电影画廊以 0x21 登记为准；0x1F 的 7 个组名仅作记录，样本粒度
+  太粗不作回想解锁依据，回想解锁以到达进度为准）；
 - 第二个游戏的数据包做兼容性验证（同引擎其他作品）。
 
 ## 未决问题清单
