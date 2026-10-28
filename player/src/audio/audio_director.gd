@@ -20,6 +20,7 @@ var _voice_bus := -1
 # Web mode: resources are fetched before they can play; a request
 # token per channel drops fetches that a newer call superseded.
 var _bgm_req := 0
+var _bgm_want := -1  # track the script most recently asked for
 var _voice_req := 0
 var _bgv_req := 0
 
@@ -102,14 +103,28 @@ func play_bgm(track: int) -> void:
 	if track == current_bgm and _bgm.playing:
 		return
 	_bgm_req += 1
-	var token := _bgm_req
-	if pkg.is_web() and pkg.bgm_bytes(track).is_empty():
-		await pkg.ensure_bgm(track)
-		if token != _bgm_req:
-			return
+	_bgm_want = track
+	# Fire-and-forget: a BGM download can take a minute on a slow
+	# link, and the result must still be played when it lands as
+	# long as this track is what the script currently wants. The
+	# old await-in-place design dropped every slow fetch whose
+	# scene had already moved on, so BGM never started at all.
+	_bgm_kick(track, _bgm_req)
+
+
+func _bgm_kick(track: int, token: int) -> void:
 	var bytes := pkg.bgm_bytes(track)
+	if pkg.is_web() and bytes.is_empty():
+		await pkg.ensure_bgm(track)
+		bytes = pkg.bgm_bytes(track)
+		if bytes.is_empty():
+			await get_tree().create_timer(0.8).timeout
+			await pkg.ensure_bgm(track)
+			bytes = pkg.bgm_bytes(track)
 	if bytes.is_empty():
 		return
+	if token != _bgm_req or _bgm_want != track:
+		return  # superseded while downloading; bytes stay cached
 	_bgm.stream = _stream(bytes, "bgm_%02d" % track, bgm_loop)
 	_bgm.play()
 	current_bgm = track
@@ -117,6 +132,7 @@ func play_bgm(track: int) -> void:
 
 func stop_bgm() -> void:
 	_bgm_req += 1
+	_bgm_want = -1
 	_bgm.stop()
 	current_bgm = -1
 
@@ -128,11 +144,22 @@ func fade_bgm(_ms: int) -> void:
 func play_voice(voice_name: String) -> void:
 	_voice_req += 1
 	var token := _voice_req
-	if pkg.is_web() and pkg.voice_bytes(voice_name).is_empty():
+	var bytes := pkg.voice_bytes(voice_name)
+	if pkg.is_web() and bytes.is_empty():
 		await pkg.ensure_voice(voice_name)
 		if token != _voice_req:
 			return
-	var bytes := pkg.voice_bytes(voice_name)
+		bytes = pkg.voice_bytes(voice_name)
+		if bytes.is_empty():
+			# One late retry after a transient fetch failure:
+			# the line must not stay muted for good.
+			await get_tree().create_timer(0.8).timeout
+			if token != _voice_req:
+				return
+			await pkg.ensure_voice(voice_name)
+			if token != _voice_req:
+				return
+			bytes = pkg.voice_bytes(voice_name)
 	if bytes.is_empty():
 		return
 	_voice.stream = _stream(bytes, "v_" + voice_name, false)
@@ -147,14 +174,25 @@ func stop_voice() -> void:
 func play_bgv(voice_name: String) -> void:
 	_bgv_req += 1
 	var token := _bgv_req
-	if pkg.is_web() and pkg.voice_bytes(voice_name).is_empty():
+	var bytes := pkg.voice_bytes(voice_name)
+	if pkg.is_web() and bytes.is_empty():
 		await pkg.ensure_voice(voice_name)
 		if token != _bgv_req:
 			return
-	var bytes := pkg.voice_bytes(voice_name)
+		bytes = pkg.voice_bytes(voice_name)
+		if bytes.is_empty():
+			await get_tree().create_timer(0.8).timeout
+			if token != _bgv_req:
+				return
+			await pkg.ensure_voice(voice_name)
+			if token != _bgv_req:
+				return
+			bytes = pkg.voice_bytes(voice_name)
 	if bytes.is_empty():
 		return
-	_bgv.stream = _stream(bytes, "v_" + voice_name, false)
+	# Ambience loops until the script stops it (fire crackle etc.);
+	# a non-looping stream played the loop once and went silent.
+	_bgv.stream = _stream(bytes, "v_" + voice_name, true)
 	_bgv.play()
 
 
@@ -165,6 +203,12 @@ func stop_bgv() -> void:
 
 func any_voice_playing() -> bool:
 	return _voice.playing or _bgv.playing
+
+
+## Line voice only (BGV ambience loops forever and must not block
+## voice-wait logic).
+func voice_playing() -> bool:
+	return _voice.playing
 
 
 ## Diagnostic snapshot for the autoplay harness: is anything

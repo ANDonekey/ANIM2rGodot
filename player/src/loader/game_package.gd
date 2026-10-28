@@ -27,6 +27,7 @@ var _define_cache: PackedByteArray
 var _web: WebSource
 var _base: String = ""
 var _file_cache: Dictionary = {}  # relpath -> raw bytes
+var _inflight: Dictionary = {}  # relpath -> true while a fetch runs
 # anim-webpkg/2 (bundled): every file is a span inside a bundle file.
 var _bundles: Array = []  # bundle relpaths, index = bundle id
 var _spans: Dictionary = {}  # relpath -> [bundle id, offset, size]
@@ -173,14 +174,56 @@ func _open_pack_web(rel: String) -> GFilePack:
 func _fetch_file(rel: String) -> PackedByteArray:
 	if _file_cache.has(rel):
 		return _file_cache[rel]
+	# Dedupe concurrent fetches of the same file: without this,
+	# a repeated request (e.g. BGM re-asserted by the script)
+	# restarted the whole download and starved the first one.
+	while _inflight.has(rel):
+		await _web.get_tree().process_frame
+		if _file_cache.has(rel):
+			return _file_cache[rel]
+	_inflight[rel] = true
 	var bytes: PackedByteArray
 	if _spans.has(rel):
 		var s: Array = _spans[rel]
-		bytes = await _web.fetch_range(
-				_base + _bundles[int(s[0])], int(s[1]), int(s[2]))
+		var url: String = _base + str(_bundles[int(s[0])])
+		var size := int(s[2])
+		if size > 8 * 1024 * 1024:
+			# Large files (BGM tracks run to 30 MB) go in
+			# parallel 4 MiB chunks: a transient failure costs
+			# one chunk, not the whole track; no single
+			# request can time out; and parallel chunks keep
+			# a high-latency link busy.
+			var chunk_n := 4 * 1024 * 1024
+			var total := (size + chunk_n - 1) / chunk_n
+			var parts: Array = []
+			parts.resize(total)
+			var done := [0]
+			for i in total:
+				var n := mini(chunk_n, size - i * chunk_n)
+				_fetch_part(url, int(s[1]) + i * chunk_n, n,
+						parts, i, done)
+			while int(done[0]) < total:
+				await _web.get_tree().process_frame
+			var ok := true
+			for p in parts:
+				if p == null or (p as PackedByteArray).size() == 0:
+					ok = false
+					break
+			if ok:
+				bytes = PackedByteArray()
+				for p in parts:
+					bytes.append_array(p)
+			else:
+				bytes = PackedByteArray()
+		else:
+			bytes = await _web.fetch_range(url, int(s[1]), size)
 	else:
 		bytes = await _web.fetch(_base + rel)
-	_file_cache[rel] = bytes
+	_inflight.erase(rel)
+	# Failed fetches are NOT cached: caching an empty result used
+	# to poison the file for the rest of the session.
+	if not bytes.is_empty():
+		_file_cache[rel] = bytes
 	return bytes
 
 
@@ -203,6 +246,14 @@ func ensure_bgm(track: int) -> void:
 	var rel: Variant = _bgm.get(track)
 	if rel != null:
 		await _fetch_file(rel)
+
+
+## One chunk of a parallel large-file fetch (see _fetch_file).
+func _fetch_part(url: String, start: int, n: int, parts: Array,
+		idx: int, done: Array) -> void:
+	var chunk: PackedByteArray = await _web.fetch_range(url, start, n)
+	parts[idx] = chunk if chunk.size() == n else PackedByteArray()
+	done[0] = int(done[0]) + 1
 
 
 func _pack_entry_name(pack: GFilePack, entry_name: String, ext: String) -> String:

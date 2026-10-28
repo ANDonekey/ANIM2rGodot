@@ -16,7 +16,7 @@ var _pending: Dictionary = {}  # id -> PackedByteArray
 
 
 func fetch(url: String) -> PackedByteArray:
-	return await _request(url, PackedStringArray())
+	return await _request(url, PackedStringArray(), -1, 0)
 
 
 func fetch_range(url: String, start: int, length: int) -> PackedByteArray:
@@ -24,14 +24,41 @@ func fetch_range(url: String, start: int, length: int) -> PackedByteArray:
 		return PackedByteArray()
 	var headers := PackedStringArray(
 			["Range: bytes=%d-%d" % [start, start + length - 1]])
-	return await _request(url, headers)
+	return await _request(url, headers, start, length)
 
 
-func _request(url: String, headers: PackedStringArray) -> PackedByteArray:
+## One logical request with retries: the static host (r2.dev) is
+## known to throw transient 500s, and a single failed fetch used to
+## silence the corresponding audio file for the whole session.
+## Range requests additionally validate the body: a 200 response
+## (Range ignored by an intermediary) is only usable when it holds
+## the requested window, which is then sliced out.
+func _request(url: String, headers: PackedStringArray,
+		range_start: int, range_len: int) -> PackedByteArray:
+	for attempt in 3:
+		if attempt > 0:
+			await get_tree().create_timer(0.6 * attempt).timeout
+		var body := await _request_once(url, headers)
+		if body.is_empty():
+			continue
+		if range_start < 0:
+			return body
+		if body.size() == range_len:
+			return body
+		if body.size() > range_len and body.size() >= range_start + range_len:
+			# Full-body 200 for a Range request: slice the window.
+			return body.slice(range_start, range_start + range_len)
+		push_warning("WebSource: bad range body (%d bytes, want %d) for %s"
+				% [body.size(), range_len, url])
+	push_warning("WebSource: giving up after retries: %s" % url)
+	return PackedByteArray()
+
+
+func _request_once(url: String, headers: PackedStringArray) -> PackedByteArray:
 	_seq += 1
 	var id := _seq
 	var http := HTTPRequest.new()
-	http.timeout = 300.0
+	http.timeout = 120.0
 	http.accept_gzip = false  # gzip would corrupt Range offsets
 	add_child(http)
 	var err := http.request(url, headers)

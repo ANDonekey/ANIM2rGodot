@@ -20,6 +20,7 @@ var _web: WebSource
 var _web_url: String = ""
 var _web_off: int = 0
 var _entry_cache: Dictionary = {}  # lowercase name -> PackedByteArray
+var _inflight: Dictionary = {}  # lowercase name -> true while fetching
 
 
 static func open(path: String) -> GFilePack:
@@ -108,8 +109,19 @@ func get_entry_async(entry_name: String) -> PackedByteArray:
 	var e: Variant = _index.get(key)
 	if e == null:
 		return PackedByteArray()
+	# Dedupe concurrent fetches of the same entry.
+	while _inflight.has(key):
+		await _web.get_tree().process_frame
+		if _entry_cache.has(key):
+			return _entry_cache[key]
+	_inflight[key] = true
 	var bytes: PackedByteArray = await _web.fetch_range(_web_url, _web_off + int(e[0]), int(e[1]))
-	_entry_cache[key] = bytes
+	_inflight.erase(key)
+	# Failed fetches are NOT cached (see GamePackage._fetch_file):
+	# an empty result here used to silence the entry for the whole
+	# session after one transient HTTP error.
+	if not bytes.is_empty():
+		_entry_cache[key] = bytes
 	return bytes
 
 
