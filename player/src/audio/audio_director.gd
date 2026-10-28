@@ -1,9 +1,9 @@
 class_name AudioDirector
 extends Node
-## BGM (.eog = 8-byte CRM header + Ogg Vorbis), dialogue voice and
-## background voice (op 0x88). Streams are materialized into
-## user://audio_cache/ once, because AudioStreamOggVorbis streams from
-## files, not memory buffers.
+## BGM (.eog = 8-byte CRM header + Ogg Vorbis), dialogue voice,
+## background voice (op 0x88, looping) and one-shot SE (op 0x8B).
+## Streams are materialized into user://audio_cache/ once, because
+## AudioStreamOggVorbis streams from files, not memory buffers.
 
 var pkg: GamePackage
 var current_bgm := -1
@@ -23,6 +23,9 @@ var _bgm_req := 0
 var _bgm_want := -1  # track the script most recently asked for
 var _voice_req := 0
 var _bgv_req := 0
+var _se_pool: Array[AudioStreamPlayer] = []
+var _se_rr := 0
+var _se_gain := 0.8
 
 @onready var _bgm: AudioStreamPlayer = $BGM
 @onready var _voice: AudioStreamPlayer = $Voice
@@ -55,6 +58,17 @@ func setup(p_pkg: GamePackage) -> void:
 		AudioServer.set_bus_send(_voice_bus, "Master")
 	_voice.bus = "Voice"
 	_bgv.bus = "Voice"
+	# One-shot SE players (op 0x8B): a small pool, because the script
+	# can fire two SE at the same beat (slots 1+2) and a shot must
+	# never cut the BGV loop, the dialogue voice, or another shot.
+	for i in 4:
+		var p := AudioStreamPlayer.new()
+		p.name = "SE%d" % i
+		if OS.has_feature("web"):
+			p.playback_type = 1
+		p.volume_db = linear_to_db(maxf(_se_gain, 0.0001))
+		add_child(p)
+		_se_pool.append(p)
 
 
 ## Current voice loudness 0..1 (0 when silent); drives E-mote lip sync.
@@ -69,6 +83,12 @@ func set_voice_gain(f: float) -> void:
 
 func set_bgv_gain(f: float) -> void:
 	_bgv.volume_db = linear_to_db(maxf(f, 0.0001))
+
+
+func set_se_gain(f: float) -> void:
+	_se_gain = f
+	for p in _se_pool:
+		p.volume_db = linear_to_db(maxf(f, 0.0001))
 
 
 func voice_level() -> float:
@@ -199,6 +219,32 @@ func play_bgv(voice_name: String) -> void:
 func stop_bgv() -> void:
 	_bgv_req += 1
 	_bgv.stop()
+
+
+## One-shot sound effects (op 0x8B): short wave-pack clips played
+## once on the SE channel. Independent of voice and BGV: an SE
+## trigger must not stop or replace either (the previous mapping
+## of op 0x8B to "stop BGV" was a decode error — see script_vm).
+func play_se(se_name: String) -> void:
+	var bytes := pkg.voice_bytes(se_name)
+	if pkg.is_web() and bytes.is_empty():
+		await pkg.ensure_voice(se_name)
+		bytes = pkg.voice_bytes(se_name)
+		if bytes.is_empty():
+			await get_tree().create_timer(0.8).timeout
+			await pkg.ensure_voice(se_name)
+			bytes = pkg.voice_bytes(se_name)
+	if bytes.is_empty() or _se_pool.is_empty():
+		return
+	var p := _se_pool[_se_rr % _se_pool.size()]
+	_se_rr += 1
+	p.stream = _stream(bytes, "v_" + se_name, false)
+	p.play()
+
+
+func stop_se() -> void:
+	for p in _se_pool:
+		p.stop()
 
 
 func any_voice_playing() -> bool:

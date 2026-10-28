@@ -314,8 +314,13 @@ func run_until_event() -> Dictionary:
 			0x88:
 				_effect("voice_play", {"name": sce.pool_str(ops[1])})
 				pc += 1
-			0x8B:
-				_effect("voice_stop", {"name": sce.pool_str(ops[1])})
+			0x8B:  # one-shot SE on the SE channel (slot is almost
+				# always 1). Verified 2026-10-29 against the original
+				# engine by waveform correlation: the named wave file
+				# plays once at the trigger point — it is NOT a stop,
+				# and its targets barely overlap op 0x88's.
+				_effect("se_play", {"name": sce.pool_str(ops[1]),
+						"slot": ops[0]})
 				pc += 1
 			0x52:
 				_effect("emote_load", {"slot": _eval(ops[0]), "name": sce.pool_str(ops[1])})

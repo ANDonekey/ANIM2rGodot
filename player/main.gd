@@ -290,6 +290,7 @@ func _new_vm(request: int) -> void:
 	audio.stop_voice()
 	_apply_bgv_gain(false)
 	audio.stop_bgv()
+	audio.stop_se()
 	vm = ScriptVM.new(_sce)
 	vm.recollection_request = request
 	vm.watch_targets = _recol_targets
@@ -324,6 +325,8 @@ func _apply_settings() -> void:
 			linear_to_db(maxf(master, 0.0001)))
 	audio.set_bgm_gain(int(v["bgm"]) / 100.0
 			if bool(v["play_bgm"]) else 0.0)
+	audio.set_se_gain(int(v["se"]) / 100.0
+			if bool(v["play_se"]) else 0.0)
 	_apply_bgv_gain(false)
 	if not OS.has_feature("web"):
 		DisplayServer.window_set_mode(
@@ -650,8 +653,8 @@ func _apply_effect(e: Dictionary) -> void:
 			audio.fade_bgm(e["ms"])
 		"voice_play":
 			audio.play_bgv(e["name"])
-		"voice_stop":
-			audio.stop_bgv()
+		"se_play":
+			audio.play_se(e["name"])
 		"emote_load":
 			stage.emote_load(e["slot"], e["name"])
 		"emote_unload":
