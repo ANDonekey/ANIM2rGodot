@@ -56,6 +56,14 @@ var stats_blinks := 0
 var stats_renders := 0
 var stats_render_ms := 0.0
 var stats_collect_ms := 0.0
+var stats_mask_bakes := 0
+var stats_mask_hits := 0
+# Baked mask textures (see _masked_texture): byte-budgeted LRU.
+var _mask_cache: Dictionary = {}
+var _mask_lru: Array[String] = []
+var _mask_sizes: Dictionary = {}
+var _mask_bytes := 0
+const MASK_CACHE_BUDGET := 64 * 1024 * 1024
 var stats_fast := 0
 
 
@@ -755,6 +763,71 @@ func _geom_alpha_at(aux: Dictionary, pos: Vector2) -> float:
 
 
 func _masked_polygon(st: Dictionary, p: Dictionary) -> Polygon2D:
+	var tex := _masked_texture(st, p)
+	if tex == null:
+		return null
+	return _warp_polygon(st, p, tex)
+
+
+## Quantized grid dump for cache keys: 0.5 px steps — the same
+## tolerance the render signature uses for offsets. Mask alpha
+## sampled at icon resolution cannot tell the difference.
+func _quant_grid(grid: Array) -> String:
+	var parts := PackedStringArray()
+	for pt in grid:
+		var v: Vector2 = pt
+		parts.append(str(int(round(v.x * 2.0))) + ","
+				+ str(int(round(v.y * 2.0))))
+	return ";".join(parts)
+
+
+## The baked texture of a masked part is a pure function of the
+## part's icon, its own grid, and its clip geoms (each: blank dims
+## or icon + grid). During driver animation the whole character
+## usually moves together, so the quantized key stays stable for
+## long stretches and the per-pixel bake runs once, not per render.
+func _mask_key(st: Dictionary, p: Dictionary) -> String:
+	var sb := PackedStringArray()
+	sb.append(str(st["name"]) + "|" + str(p["tex"]) + "|"
+			+ str(p["icon"]) + "|" + str(p["rect"]) + "|"
+			+ str(p["grid_n"]))
+	sb.append(_quant_grid(p["grid"]))
+	for g in p["clip"]:
+		if g.has("blank"):
+			sb.append("B" + str(g["blank"][0]) + "x" + str(g["blank"][1]))
+		else:
+			sb.append(str(g["tex"]) + "|" + str(g["icon"]) + "|"
+					+ str(g["rect"]))
+		sb.append(str(g["grid_n"]) + ":" + _quant_grid(g["grid"]))
+	return "\n".join(sb)
+
+
+func _masked_texture(st: Dictionary, p: Dictionary) -> Texture2D:
+	var key := _mask_key(st, p)
+	if _mask_cache.has(key):
+		stats_mask_hits += 1
+		_mask_lru.erase(key)
+		_mask_lru.append(key)
+		return _mask_cache[key]
+	stats_mask_bakes += 1
+	var tex := _bake_masked_texture(st, p)
+	if tex == null:
+		return null
+	_mask_cache[key] = tex
+	_mask_lru.append(key)
+	var r: Rect2i = p["rect"]
+	var nbytes := r.size.x * r.size.y * 4
+	_mask_sizes[key] = nbytes
+	_mask_bytes += nbytes
+	while _mask_bytes > MASK_CACHE_BUDGET and _mask_lru.size() > 1:
+		var victim: String = _mask_lru.pop_front()
+		_mask_bytes -= int(_mask_sizes.get(victim, 0))
+		_mask_sizes.erase(victim)
+		_mask_cache.erase(victim)
+	return tex
+
+
+func _bake_masked_texture(st: Dictionary, p: Dictionary) -> Texture2D:
 	var base := _icon_image(st, p["tex"], p["icon"], p["rect"])
 	if base == null:
 		return null
@@ -790,7 +863,7 @@ func _masked_polygon(st: Dictionary, p: Dictionary) -> Polygon2D:
 				if col.a > 0.0:
 					col.a *= acc
 					img.set_pixel(px, py, col)
-	return _warp_polygon(st, p, ImageTexture.create_from_image(img))
+	return ImageTexture.create_from_image(img)
 
 
 # ---- drivers: pose transitions, blink, lip sync, physics ----

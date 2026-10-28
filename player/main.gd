@@ -562,6 +562,8 @@ func _process(delta: float) -> void:
 			dbg["render_ms"] = snappedf(stage.stats_render_ms, 0.1)
 			dbg["collect_ms"] = snappedf(stage.stats_collect_ms, 0.1)
 			dbg["fast"] = stage.stats_fast
+			dbg["mask_bakes"] = stage.stats_mask_bakes
+			dbg["mask_hits"] = stage.stats_mask_hits
 			dbg["fps"] = Engine.get_frames_per_second()
 			Engine.get_singleton("JavaScriptBridge").eval(
 					"window.__animAudio = "
@@ -942,6 +944,8 @@ func _finish_autoplay() -> void:
 			"blinks": stage.stats_blinks,
 			"renders": stage.stats_renders,
 			"render_ms": snappedf(stage.stats_render_ms, 0.1),
+			"mask_bakes": stage.stats_mask_bakes,
+			"mask_hits": stage.stats_mask_hits,
 			"ended": _ended, "shots": _shot_beats.keys()}
 	if OS.has_feature("web"):
 		# No filesystem to write stats to and quit() would kill the
