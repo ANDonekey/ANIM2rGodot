@@ -467,8 +467,20 @@ func _on_gallery_scenes_requested() -> void:
 	gallery.show_scenes(entries)
 
 
+var _audio_probe_t := 0.0
+
+
 func _process(delta: float) -> void:
 	stage.set_voice_level(audio.voice_level())
+	# Autoplay harness: publish a live audio snapshot for web test
+	# drivers (bus peaks + player states) about once a second.
+	if _auto and OS.has_feature("web"):
+		_audio_probe_t += delta
+		if _audio_probe_t >= 1.0:
+			_audio_probe_t = 0.0
+			Engine.get_singleton("JavaScriptBridge").eval(
+					"window.__animAudio = "
+					+ JSON.stringify(audio.debug_state()), true)
 	# A gallery movie that ended on its own returns to the list.
 	if _gallery_movie != "" and not stage.movie_playing():
 		_gallery_movie = ""

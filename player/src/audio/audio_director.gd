@@ -30,6 +30,19 @@ var _bgv_req := 0
 
 func setup(p_pkg: GamePackage) -> void:
 	pkg = p_pkg
+	# Web exports default to Sample playback (since Godot 4.3),
+	# whose WebAudio graph silently drops this game's audio on the
+	# way to the destination (measured: buffer sources carry real
+	# signal, destination receives exact zeros, on the public build;
+	# a stock minimal project is unaffected). Stream playback routes
+	# through the Godot mixer like desktop: buses, gains, peak
+	# meters (lip sync) all behave identically.
+	if OS.has_feature("web"):
+		# playback_type: 0 Default, 1 Stream, 2 Sample (the enum
+		# constants are not exposed to GDScript in 4.7).
+		_bgm.playback_type = 1
+		_voice.playback_type = 1
+		_bgv.playback_type = 1
 	DirAccess.make_dir_recursive_absolute("user://audio_cache")
 	# Route voice to its own bus so the stage can read its peak level
 	# for lip sync without the BGM polluting the measurement.
@@ -152,3 +165,25 @@ func stop_bgv() -> void:
 
 func any_voice_playing() -> bool:
 	return _voice.playing or _bgv.playing
+
+
+## Diagnostic snapshot for the autoplay harness: is anything
+## actually producing samples, and at what gain?
+func debug_state() -> Dictionary:
+	return {
+		"bgm_playing": _bgm.playing,
+		"bgm_has_stream": _bgm.stream != null,
+		"bgm_pos": snappedf(_bgm.get_playback_position(), 0.1),
+		"voice_playing": _voice.playing,
+		"voice_has_stream": _voice.stream != null,
+		"master_peak_db": maxf(
+				AudioServer.get_bus_peak_volume_left_db(0, 0), -120.0),
+		"voice_peak_db": maxf(
+				AudioServer.get_bus_peak_volume_left_db(
+						_voice_bus, 0), -120.0) if _voice_bus >= 0 else -120.0,
+		"master_vol_db": snappedf(AudioServer.get_bus_volume_db(0), 0.1),
+		"bgm_vol_db": snappedf(_bgm.volume_db, 0.1),
+		"mix_rate": AudioServer.get_mix_rate(),
+	}
+
+
