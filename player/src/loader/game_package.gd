@@ -163,21 +163,50 @@ func open_web(source: WebSource, base_url: String) -> bool:
 	var movies: Dictionary = parsed.get("movies", {})
 	for orig in movies:
 		_movies[orig.to_lower()] = movies[orig]
-	if psb_rel != "":
-		_psb_pack = await _open_pack_web(psb_rel)
-	if voice_rel != "":
-		_voice_pack = await _open_pack_web(voice_rel)
-	var sce_raw: PackedByteArray = await _fetch_file(sce_name)
-	_sce_cache = sce_raw if _pre_decrypted else _decrypt_bytes(sce_raw)
+	# sce/define download in parallel with the pack opens (with
+	# manifest-embedded indexes the packs need no round trips at all,
+	# so opening is manifest -> these two files -> done).
+	var packs_idx: Dictionary = parsed.get("packs", {})
+	var sce_holder: Array = [PackedByteArray(), false]
+	_fetch_into(sce_name, sce_holder)
+	var def_holder: Array = [PackedByteArray(), true]
 	if define_name != "":
-		var def_raw: PackedByteArray = await _fetch_file(define_name)
-		_define_cache = def_raw if _pre_decrypted else _decrypt_bytes(def_raw)
+		def_holder[1] = false
+		_fetch_into(define_name, def_holder)
+	if psb_rel != "":
+		_psb_pack = await _open_pack_web(psb_rel, packs_idx)
+	if voice_rel != "":
+		_voice_pack = await _open_pack_web(voice_rel, packs_idx)
+	while not (bool(sce_holder[1]) and bool(def_holder[1])):
+		await source.get_tree().process_frame
+	_sce_cache = sce_holder[0] if _pre_decrypted \
+			else _decrypt_bytes(sce_holder[0])
+	if define_name != "":
+		_define_cache = def_holder[0] if _pre_decrypted \
+				else _decrypt_bytes(def_holder[0])
 	return not _sce_cache.is_empty()
 
 
+## Fire-and-forget wrapper for parallel fetches at open: holder is
+## [bytes, done]; done flips true even when the fetch fails (empty).
+func _fetch_into(rel: String, holder: Array) -> void:
+	holder[0] = await _fetch_file(rel)
+	holder[1] = true
+
+
 ## Open a GFilePack that lives in the web package: as a loose file
-## (v1) or as a span inside a bundle (v2).
-func _open_pack_web(rel: String) -> GFilePack:
+## (v1) or as a span inside a bundle (v2). When the manifest embeds
+## the pack's index ("packs"), no header fetch happens at all.
+func _open_pack_web(rel: String, packs_idx: Dictionary = {}) -> GFilePack:
+	if packs_idx.has(rel):
+		var idx: Dictionary = packs_idx[rel]
+		if _spans.has(rel):
+			var s: Array = _spans[rel]
+			return GFilePack.from_index(_web,
+					_base + _bundles[int(s[0])], int(s[1]),
+					idx["names"], idx["entries"])
+		return GFilePack.from_index(_web, _base + rel, 0,
+				idx["names"], idx["entries"])
 	if _spans.has(rel):
 		var s: Array = _spans[rel]
 		return await GFilePack.open_web_span(

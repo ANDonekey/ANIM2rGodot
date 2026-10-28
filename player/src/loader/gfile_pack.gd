@@ -98,6 +98,23 @@ static func open_web_span(source: WebSource, url: String, base_off: int) -> GFil
 	return p
 
 
+## Build a web pack from an index embedded in the package manifest
+## (anim-webpkg/2 "packs"): no header round trips at open. Entries
+## are still fetched lazily by Range, exactly like open_web_span.
+static func from_index(source: WebSource, url: String, base_off: int,
+		names_arr: Array, entries_arr: Array) -> GFilePack:
+	var p := GFilePack.new()
+	p._web = source
+	p._web_url = url
+	p._web_off = base_off
+	for i in names_arr.size():
+		var nm: String = str(names_arr[i])
+		var e: Array = entries_arr[i]
+		p.names.append(nm)
+		p._index[nm.to_lower()] = [int(e[0]), int(e[1])]
+	return p
+
+
 ## Fetch one entry over HTTP into the cache (web mode); returns the
 ## bytes. Native mode just defers to get_entry.
 func get_entry_async(entry_name: String) -> PackedByteArray:

@@ -30,6 +30,7 @@ import concurrent.futures
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -111,6 +112,30 @@ def build_bundles(flat_dir: str, out_dir: str, chunk_mb: int) -> int:
         cur_off += size
     if cur is not None:
         cur.close()
+    # Embed the GFilePack indexes in the manifest: opening a pack
+    # otherwise costs three serial Range round trips (count, entry
+    # table, name table) before the first byte of content moves.
+    packs: dict[str, dict] = {}
+    for rel in spans:
+        low = rel.lower()
+        if low == "cg/psbpack.dat" or (low.startswith("voice/")
+                                       and low.endswith(".pck")):
+            with open(os.path.join(flat_dir, rel), "rb") as f:
+                blob = f.read()
+            count = struct.unpack_from("<I", blob, 0)[0]
+            entries = []
+            for i in range(count):
+                _z, off, size = struct.unpack_from("<III", blob,
+                                                   4 + 12 * i)
+                entries.append([off, size])
+            pos = 4 + 12 * count
+            names = []
+            for _ in range(count):
+                end = blob.index(b"\x00", pos)
+                names.append(blob[pos:end].decode("ascii", "replace"))
+                pos = end + 1
+            packs[rel] = {"names": names, "entries": entries}
+            print(f"embedded pack index: {rel} ({count} entries)")
     out = {
         "format": "anim-webpkg/2",
         "sce": man.get("sce", ""),
@@ -121,6 +146,8 @@ def build_bundles(flat_dir: str, out_dir: str, chunk_mb: int) -> int:
     }
     if man.get("pre"):
         out["pre"] = man["pre"]
+    if packs:
+        out["packs"] = packs
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
     total = sum(files_in.values())
