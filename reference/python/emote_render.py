@@ -101,6 +101,11 @@ def unwrap_byte(v):
 
 
 def unwrap_coord(v):
+    # a coord component stored as a PSB int in (180, 255] is a
+    # byte-wrapped negative (234 == -22); float-stored components are
+    # genuine values
+    if isinstance(v, int) and not isinstance(v, bool) and 180 < v <= 255:
+        return v - 256
     if isinstance(v, (int, float)) and 60000 <= v < 65536:
         return v - 65536
     return v
