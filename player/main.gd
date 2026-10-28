@@ -34,6 +34,10 @@ var _boot_ticks := 0
 var _backlog: Array = []
 
 var _auto := false
+var _user_auto_t := 0.0
+var _user_skip_t := 0.0
+var _current_voice := ""
+var _current_voice_speaker := ""
 var _auto_interval := 0.35
 var _auto_left := 0.0
 var _auto_timer := 0.0
@@ -55,6 +59,38 @@ var _seen_bg := false
 func _ready() -> void:
 	_boot_ticks = Time.get_ticks_msec()
 	ui.choice_picked.connect(_on_choice_picked)
+	ui.save_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			_open_saveload("save"))
+	ui.load_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			_open_saveload("load"))
+	ui.quick_save_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			_save_game("user://save.json")
+			ui.show_status("saved"))
+	ui.quick_load_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			_load_game("user://save.json"))
+	ui.flow_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			flow_ui.open_screen(pkg))
+	ui.config_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			settings_ui.open_screen(pkg, "config"))
+	ui.volume_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			settings_ui.open_screen(pkg, "volume"))
+	ui.backlog_requested.connect(func() -> void:
+		if _session_live and not _ended:
+			ui.open_backlog(_backlog))
+	ui.title_requested.connect(func() -> void:
+		if vm != null and _session_live:
+			_show_title())
+	ui.voice_replay_requested.connect(func() -> void:
+		if _current_voice != "":
+			_apply_voice_gain(_current_voice_speaker)
+			audio.play_voice(_current_voice))
 	gallery = GalleryUI.new()
 	add_child(gallery)
 	gallery.start_story.connect(_on_gallery_start_story)
@@ -232,6 +268,7 @@ func _begin_game() -> void:
 	var define := DefineTable.parse(pkg.define_bytes())
 	stage.setup(pkg, define)
 	audio.setup(pkg)
+	ui.set_package(pkg)
 	_apply_settings()
 	_load_system()
 	_recol_table = _sce.recollection_table()
@@ -503,6 +540,24 @@ func _process(delta: float) -> void:
 	if _need_pump:
 		_need_pump = false
 		_pump()
+	# User-facing AUTO / SKIP modes from the message-window bar.
+	if not _auto and _session_live and not _ended and _waiting == "say" \
+			and not _any_screen_open():
+		if ui.auto_on:
+			_user_auto_t += delta
+			if _user_auto_t >= _auto_interval and not (
+					ui.voice_wait_on and audio.voice_playing()):
+				_user_auto_t = 0.0
+				_advance()
+		else:
+			_user_auto_t = 0.0
+		if ui.skip_on:
+			_user_skip_t += delta
+			if _user_skip_t >= 0.06:
+				_user_skip_t = 0.0
+				_advance()
+		else:
+			_user_skip_t = 0.0
 	if _auto:
 		_auto_left -= delta
 		_auto_timer += delta
@@ -530,6 +585,8 @@ func _pump() -> void:
 			"say":
 				_stat_say += 1
 				ui.present_say(ev["speaker"], ev["text"])
+				_current_voice = ev["voice"]
+				_current_voice_speaker = ev["speaker"]
 				if ev["voice"] != "":
 					_apply_voice_gain(ev["speaker"])
 					_last_voice_by_speaker[ev["speaker"]] = ev["voice"]
@@ -540,12 +597,14 @@ func _pump() -> void:
 				return
 			"narrate":
 				_stat_say += 1
+				_current_voice = ""
 				ui.present_narrate(ev["text"])
 				_backlog.append({"speaker": "", "text": ev["text"]})
 				_waiting = "say"
 				return
 			"choice":
 				_stat_choice += 1
+				ui.set_skip(false)
 				ui.show_choices(ev["options"])
 				_waiting = "choice"
 				return
@@ -563,6 +622,15 @@ func _pump() -> void:
 			_:  # stall: VM is polling a realtime wait; retry next frame
 				_need_pump = true
 				return
+
+
+func _any_screen_open() -> bool:
+	return (saveload != null and saveload.is_open()) \
+			or (settings_ui != null and settings_ui.is_open()) \
+			or (extra_ui != null and extra_ui.is_open()) \
+			or (flow_ui != null and flow_ui.is_open()) \
+			or (gallery != null and gallery.is_open()) \
+			or ui.is_backlog_open()
 
 
 func _apply_effect(e: Dictionary) -> void:
@@ -687,6 +755,17 @@ func _input(event: InputEvent) -> void:
 	# The FLOW chart handles its own input too.
 	if flow_ui != null and flow_ui.is_open():
 		return
+	# The backlog viewer closes on Esc/click and swallows input.
+	if ui.is_backlog_open():
+		if esc or click:
+			ui.close_backlog()
+		return
+	# With the message chrome hidden (x button), the next click or
+	# accept key only brings it back.
+	if ui.chrome_hidden() and _session_live and not _ended:
+		if click or event.is_action_pressed("ui_accept"):
+			ui.show_chrome()
+		return
 	# While a gallery movie plays, Esc/click stops it and reopens
 	# the movie list; nothing reaches the story VM.
 	if _gallery_movie != "":
@@ -709,7 +788,10 @@ func _input(event: InputEvent) -> void:
 		_show_title()
 		return
 	if click:
-		_advance()
+		# Clicks on the message-window bar/lamps belong to the
+		# buttons, not to story advance.
+		if not ui.chrome_hit(event.position):
+			_advance()
 	elif event.is_action_pressed("ui_accept"):
 		_advance()
 	if event is InputEventKey and event.pressed and not event.echo:
