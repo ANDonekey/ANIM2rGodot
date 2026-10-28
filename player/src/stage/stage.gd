@@ -54,6 +54,9 @@ var _pending_pose: Dictionary = {}  # slot -> [label, time_ms]
 
 var stats_blinks := 0
 var stats_renders := 0
+var stats_render_ms := 0.0
+var stats_collect_ms := 0.0
+var stats_fast := 0
 
 
 func _ready() -> void:
@@ -414,27 +417,92 @@ func _phys_offsets(st: Dictionary) -> Dictionary:
 	return out
 
 
+## The render plan for one collect() result: visible parts with a
+## stable key (label|icon plus an occurrence index — collect() walks
+## deterministically, so keys are stable across renders of the same
+## structure) and their node kind. The joined structure key changes
+## whenever the part set, kinds, textures, rects or grids change.
+func _plan_parts(st: Dictionary, parts: Array) -> Dictionary:
+	var plan := []
+	var seen := {}
+	var skey := PackedStringArray()
+	for p in parts:
+		if not p["vis"] or int(p["opa"]) <= 0:
+			continue
+		var base := str(p["label"]) + "|" + str(p["icon"])
+		var occ := int(seen.get(base, 0))
+		seen[base] = occ + 1
+		var key := base + "#" + str(occ)
+		var kind := 0  # 0 plain sprite, 1 warp polygon, 2 masked polygon
+		if not (p["clip"] as Array).is_empty() and not _clip_is_noop(st, p):
+			kind = 2
+		elif int(p["grid_n"]) > 1:
+			kind = 1
+		plan.append({"key": key, "kind": kind, "p": p})
+		skey.append(key + ":" + str(kind) + ":" + str(p["tex"])
+				+ ":" + str(p["rect"]) + ":" + str(p["grid_n"]))
+	return {"plan": plan, "skey": "|".join(skey)}
+
+
 func _render_slot(slot: int, fade_seconds: float, rvars: Dictionary, offsets: Dictionary) -> void:
 	stats_renders += 1
+	var _t0 := Time.get_ticks_usec()
 	var st: Dictionary = _slots[slot]
 	var model: EmoteModel = st["model"]
+	var _tc := Time.get_ticks_usec()
 	var parts := model.collect(model.base_chara(), model.base_motion(), rvars, offsets)
+	stats_collect_ms += (Time.get_ticks_usec() - _tc) / 1000.0
+	var planned := _plan_parts(st, parts)
+	var plan: Array = planned["plan"]
+	# Fast path: same model, same structure, no fade — update the
+	# persistent part nodes in place instead of rebuilding the tree.
+	var cache: Dictionary = st.get("reuse", {})
+	if fade_seconds <= 0.0 and not cache.is_empty() \
+			and cache.get("skey") == planned["skey"] \
+			and cache.get("model") == model \
+			and is_instance_valid(cache.get("root")):
+		var nodes: Dictionary = cache["nodes"]
+		var complete := true
+		for item in plan:
+			if not nodes.has(item["key"]):
+				complete = false
+				break
+		if complete:
+			stats_fast += 1
+			var ord2 := 0
+			for item in plan:
+				var node: CanvasItem = nodes[item["key"]]
+				_update_part_node(st, node, item["p"], int(item["kind"]), cache, item["key"])
+				node.z_index = ord2
+				ord2 += 1
+			st["parts"] = parts
+			st["sig"] = _signature(rvars, offsets)
+			stats_render_ms += (Time.get_ticks_usec() - _t0) / 1000.0
+			st["last_ms"] = (Time.get_ticks_usec() - _t0) / 1000.0
+			return
+	# Full rebuild (structure change, fade, or first render).
 	var old_root: Node2D = st["parts_root"]
 	var new_root := Node2D.new()
 	st["root"].add_child(new_root)
 	var order := 0
-	for p in parts:
-		if not p["vis"] or int(p["opa"]) <= 0:
+	var nodes := {}
+	var metas := {}
+	for item in plan:
+		var node := _part_node(st, item["p"], int(item["kind"]))
+		if node == null:
 			continue
-		var item := _part_node(st, p)
-		if item == null:
-			continue
-		item.z_index = order
+		node.z_index = order
 		order += 1
-		new_root.add_child(item)
+		new_root.add_child(node)
+		nodes[item["key"]] = node
+		metas[item["key"]] = {"tex": item["p"]["tex"],
+				"rect": item["p"]["rect"], "grid_n": item["p"]["grid_n"],
+				"ox": item["p"]["ox"], "oy": item["p"]["oy"]}
 	st["parts_root"] = new_root
 	st["parts"] = parts
 	st["sig"] = _signature(rvars, offsets)
+	st["reuse"] = {"skey": planned["skey"], "model": model,
+			"root": new_root, "nodes": nodes, "meta": metas}
 	if fade_seconds > 0.0 and is_inside_tree():
 		new_root.modulate.a = 0.0
 		var tw := create_tween()
@@ -446,14 +514,73 @@ func _render_slot(slot: int, fade_seconds: float, rvars: Dictionary, offsets: Di
 	else:
 		if old_root != new_root:
 			old_root.queue_free()
+	stats_render_ms += (Time.get_ticks_usec() - _t0) / 1000.0
+	st["last_ms"] = (Time.get_ticks_usec() - _t0) / 1000.0
 
 
-func _part_node(st: Dictionary, p: Dictionary) -> CanvasItem:
-	if not (p["clip"] as Array).is_empty() and not _clip_is_noop(st, p):
+## In-place update of a persistent part node on the fast path. Only
+## per-frame values (transform, grid points, opacity) are touched
+## unless the part's static texture/rect/grid changed.
+func _update_part_node(st: Dictionary, node: CanvasItem, p: Dictionary, kind: int, cache: Dictionary, key: String) -> void:
+	var meta: Dictionary = cache["meta"][key]
+	var static_changed: bool = meta.get("tex") != p["tex"] \
+			or meta.get("rect") != p["rect"] \
+			or int(meta.get("grid_n", -1)) != int(p["grid_n"]) \
+			or float(meta.get("ox", 0.0)) != float(p["ox"]) \
+			or float(meta.get("oy", 0.0)) != float(p["oy"])
+	if kind == 0:
+		var spr := node as Sprite2D
+		if static_changed:
+			spr.texture = _atlas(st["model"], st["name"], p["tex"])
+			spr.region_enabled = true
+			spr.region_rect = p["rect"]
+			spr.centered = false
+			spr.offset = Vector2(-p["ox"], -p["oy"])
+		var m: Array = p["m"]
+		spr.transform = Transform2D(Vector2(m[0], m[2]), Vector2(m[1], m[3]),
+				Vector2(p["x"], p["y"]))
+		spr.modulate.a = int(p["opa"]) / 255.0
+	elif kind == 1:
+		var poly := node as Polygon2D
+		if static_changed:
+			_warp_setup(poly, st, p, null)
+		else:
+			var grid: Array = p["grid"]
+			var pts := PackedVector2Array()
+			pts.resize(grid.size())
+			for i in grid.size():
+				pts[i] = grid[i]
+			poly.polygon = pts
+			poly.modulate.a = int(p["opa"]) / 255.0
+	else:
+		# Masked parts still rebake their texture per render (the
+		# mask cache is a separate step); only the node is reused.
+		var fresh := _masked_polygon(st, p)
+		var poly := node as Polygon2D
+		if fresh == null:
+			poly.visible = false
+			return
+		poly.visible = true
+		poly.polygon = fresh.polygon
+		poly.uv = fresh.uv
+		poly.polygons = fresh.polygons
+		poly.texture = fresh.texture
+		poly.modulate.a = fresh.modulate.a
+		fresh.queue_free()
+	if static_changed:
+		meta["tex"] = p["tex"]
+		meta["rect"] = p["rect"]
+		meta["grid_n"] = p["grid_n"]
+		meta["ox"] = p["ox"]
+		meta["oy"] = p["oy"]
+
+
+func _part_node(st: Dictionary, p: Dictionary, kind: int) -> CanvasItem:
+	if kind == 2:
 		var masked := _masked_polygon(st, p)
 		if masked:
 			return masked
-	if int(p["grid_n"]) > 1:
+	if kind == 1:
 		return _warp_polygon(st, p, null)
 	return _plain_sprite(st, p)
 
@@ -474,6 +601,13 @@ func _plain_sprite(st: Dictionary, p: Dictionary) -> Sprite2D:
 
 func _warp_polygon(st: Dictionary, p: Dictionary, masked_tex: Texture2D) -> Polygon2D:
 	var poly := Polygon2D.new()
+	_warp_setup(poly, st, p, masked_tex)
+	return poly
+
+
+## (Re)fill a warp polygon's geometry, UVs, topology and texture —
+## used both for fresh nodes and for static changes on the fast path.
+func _warp_setup(poly: Polygon2D, st: Dictionary, p: Dictionary, masked_tex: Texture2D) -> void:
 	var r: Rect2i = p["rect"]
 	var n: int = p["grid_n"]
 	var w := float(r.size.x)
@@ -503,7 +637,6 @@ func _warp_polygon(st: Dictionary, p: Dictionary, masked_tex: Texture2D) -> Poly
 	poly.texture = masked_tex if masked_tex else _atlas(st["model"], st["name"], p["tex"])
 	poly.antialiased = true
 	poly.modulate.a = int(p["opa"]) / 255.0
-	return poly
 
 
 # ---- stencil masking (CPU, icon resolution) ----
@@ -748,10 +881,16 @@ func _drive_slot(slot: int, delta: float) -> bool:
 			ph["v"] = v
 		if p.length() > 0.05 or v.length() > 0.2:
 			phys_settled = false
-	# compose and render only on real change; while drivers are active,
-	# coalesce re-renders to one per 0.05 s of driver time (each render
-	# is a full pose re-evaluation), but always render the settled state.
+	# Compose and render only on real change; while drivers are active,
+	# coalesce re-renders (each is a full pose re-evaluation), but
+	# always render the settled state. The coalesce interval adapts to
+	# the measured cost of the slot's last render: on fast platforms it
+	# stays at the 0.05 s floor (smooth), on the single-threaded Web
+	# build a 300 ms evaluation stretches it so rendering cannot starve
+	# everything else.
 	st["drv_t"] = float(st["drv_t"]) + delta
+	var drv_interval := clampf(1.5 * float(st.get("last_ms", 0.0)) / 1000.0,
+			0.05, 0.30)
 	var rv: Dictionary = (st["rvars"] as Dictionary).duplicate()
 	if blink_off > 0.0:
 		var label: String = eye.get("label", "face_eye_open")
@@ -767,7 +906,7 @@ func _drive_slot(slot: int, delta: float) -> bool:
 		return false
 	var idle := st["trans"] == null and float(st["blink_t"]) < 0.0 \
 			and absf(float(st["talk_v"]) - talk_target) < 0.02 and phys_settled
-	if not idle and float(st["drv_t"]) < 0.05:
+	if not idle and float(st["drv_t"]) < drv_interval:
 		return false
 	st["drv_t"] = 0.0
 	_render_slot(slot, 0.0, rv, offsets)

@@ -520,6 +520,10 @@ func _process(delta: float) -> void:
 			_audio_probe_t = 0.0
 			var dbg := audio.debug_state()
 			dbg["renders"] = stage.stats_renders
+			dbg["render_ms"] = snappedf(stage.stats_render_ms, 0.1)
+			dbg["collect_ms"] = snappedf(stage.stats_collect_ms, 0.1)
+			dbg["fast"] = stage.stats_fast
+			dbg["fps"] = Engine.get_frames_per_second()
 			Engine.get_singleton("JavaScriptBridge").eval(
 					"window.__animAudio = "
 					+ JSON.stringify(dbg), true)
@@ -883,6 +887,7 @@ func _finish_autoplay() -> void:
 			"choices": _stat_choice, "effects": _stat_effects,
 			"blinks": stage.stats_blinks,
 			"renders": stage.stats_renders,
+			"render_ms": snappedf(stage.stats_render_ms, 0.1),
 			"ended": _ended, "shots": _shot_beats.keys()}
 	if OS.has_feature("web"):
 		# No filesystem to write stats to and quit() would kill the
