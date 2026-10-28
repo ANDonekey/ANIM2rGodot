@@ -29,6 +29,14 @@ static func apply_font(c: Control, size: int) -> void:
 
 
 var _panel: PanelContainer
+var _panel_style: StyleBoxFlat
+
+
+## Message window opacity from the CONFIG setting (alpha of the
+## window background; the text stays fully opaque).
+func set_window_opacity(alpha: float) -> void:
+	if _panel_style != null:
+		_panel_style.bg_color.a = alpha
 var _name_label: Label
 var _text_label: Label
 var _hint: Label
@@ -67,6 +75,7 @@ func _ready() -> void:
 	_panel.offset_top = -178
 	_panel.offset_bottom = -18
 	var style := StyleBoxFlat.new()
+	_panel_style = style
 	style.bg_color = Color(0.02, 0.03, 0.08, 0.78)
 	style.corner_radius_top_left = 10
 	style.corner_radius_top_right = 10
@@ -129,6 +138,10 @@ func present_narrate(text: String) -> void:
 
 func hide_dialogue() -> void:
 	_panel.visible = false
+
+
+func hide_choices() -> void:
+	_menu.visible = false
 
 
 func show_choices(options: Array) -> void:

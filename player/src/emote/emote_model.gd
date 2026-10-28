@@ -15,8 +15,10 @@ extends RefCounted
 ## dict shapes; blank geoms carry "blank": [w, h] and no "tex").
 ##
 ## Storage quirks (measured, mirrored from the Python evaluator):
-## coord components are int16-wrapped; int angles / parameter ranges in
-## (180, 255] are byte-wrapped negatives; icon origins in (180, 255]
+## coord components are int16-wrapped, and a coord component stored as
+## a PSB int in (180, 255] is a byte-wrapped negative (234 == -22;
+## float-stored components are genuine); int angles / parameter ranges
+## in (180, 255] are byte-wrapped negatives; icon origins in (180, 255]
 ## that exceed the icon's own size are byte-wrapped negatives.
 
 const FT_NULL := 0
@@ -393,6 +395,9 @@ static func _read_frame(content: Dictionary) -> Dictionary:
 	var cvals: Array = []
 	for v in coord:
 		var f := float(v)
+		if v is int and f > 180.0 and f <= 255.0:
+			# byte-wrapped negative stored as a PSB int (e.g. 234 == -22)
+			f -= 256.0
 		if f >= 60000.0 and f < 65536.0:
 			f -= 65536.0
 		cvals.append(f)
