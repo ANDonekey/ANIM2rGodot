@@ -119,6 +119,8 @@ def build_bundles(flat_dir: str, out_dir: str, chunk_mb: int) -> int:
         "files": spans,
         "movies": man.get("movies", {}),
     }
+    if man.get("pre"):
+        out["pre"] = man["pre"]
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
     total = sum(files_in.values())

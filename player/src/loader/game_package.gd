@@ -31,6 +31,15 @@ var _inflight: Dictionary = {}  # relpath -> true while a fetch runs
 # anim-webpkg/2 (bundled): every file is a span inside a bundle file.
 var _bundles: Array = []  # bundle relpaths, index = bundle id
 var _spans: Dictionary = {}  # relpath -> [bundle id, offset, size]
+# Preprocessing flags from the manifest ("pre"): the builder already
+# decrypted sce/define/cg and/or channel-swapped the PSB textures, so
+# the per-byte / per-pixel main-thread work is skipped at runtime.
+var _pre_decrypted := false
+var _pre_swapped := false
+
+
+func pre_swapped() -> bool:
+	return _pre_swapped
 
 
 func is_web() -> bool:
@@ -125,6 +134,9 @@ func open_web(source: WebSource, base_url: String) -> bool:
 	if not (parsed is Dictionary) or parsed.get("format", "") not in ["anim-webpkg/1", "anim-webpkg/2"]:
 		push_error("GamePackage(web): bad manifest at " + _base)
 		return false
+	var pre: Dictionary = parsed.get("pre", {})
+	_pre_decrypted = bool(pre.get("decrypted", false))
+	_pre_swapped = bool(pre.get("swapped", false))
 	var files: Dictionary = parsed["files"]
 	if parsed["format"] == "anim-webpkg/2":
 		_bundles = parsed["bundles"]
@@ -155,9 +167,11 @@ func open_web(source: WebSource, base_url: String) -> bool:
 		_psb_pack = await _open_pack_web(psb_rel)
 	if voice_rel != "":
 		_voice_pack = await _open_pack_web(voice_rel)
-	_sce_cache = _decrypt_bytes(await _fetch_file(sce_name))
+	var sce_raw: PackedByteArray = await _fetch_file(sce_name)
+	_sce_cache = sce_raw if _pre_decrypted else _decrypt_bytes(sce_raw)
 	if define_name != "":
-		_define_cache = _decrypt_bytes(await _fetch_file(define_name))
+		var def_raw: PackedByteArray = await _fetch_file(define_name)
+		_define_cache = def_raw if _pre_decrypted else _decrypt_bytes(def_raw)
 	return not _sce_cache.is_empty()
 
 
@@ -323,7 +337,8 @@ func image_bytes(image_name: String) -> PackedByteArray:
 	if p == null:
 		return PackedByteArray()
 	if is_web():
-		return _decrypt_bytes(_cached_file(p))
+		return _cached_file(p) if _pre_decrypted \
+				else _decrypt_bytes(_cached_file(p))
 	return _decrypted(p)
 
 

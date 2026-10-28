@@ -214,6 +214,7 @@ func _model(model_name: String) -> EmoteModel:
 		return null
 	var model := EmoteModel.from_psb(Psb.parse(bytes))
 	model.fast = true
+	model.pre_swapped = pkg.pre_swapped()
 	_model_cache[model_name] = model
 	return model
 

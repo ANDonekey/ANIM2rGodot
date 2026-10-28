@@ -41,6 +41,10 @@ var _layer_offsets: Dictionary = {}
 ## parts that are never drawn. The test suite leaves this off so the
 ## output stays bit-comparable with the Python reference evaluator.
 var fast := false
+## Web packages preprocessed by web_preprocess.py store texture
+## chunks already channel-swapped; texture_image() then skips its
+## per-pixel R/B swap loop.
+var pre_swapped := false
 var _gid := 0
 var _clip_seq := 0
 var _stack: Dictionary = {}
@@ -106,6 +110,10 @@ func texture_image(tex_key: String) -> Image:
 		for i in bytes.size():
 			padded[i] = bytes[i]
 		bytes = padded
+	elif bytes.size() > total:
+		bytes = bytes.slice(0, total)
+	if pre_swapped:
+		return Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, bytes)
 	var swapped := PackedByteArray()
 	swapped.resize(total)
 	for px in w * h:
