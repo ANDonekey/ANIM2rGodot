@@ -92,7 +92,10 @@ func set_se_gain(f: float) -> void:
 
 
 func voice_level() -> float:
-	if _voice_bus < 0 or not any_voice_playing():
+	# Lip sync follows the dialogue voice only: BGV shares this bus
+	# (ambience would otherwise drive the mouth on its own — the fire
+	# loop kept talk active through the whole opening scene).
+	if _voice_bus < 0 or not voice_playing():
 		return 0.0
 	var db := AudioServer.get_bus_peak_volume_left_db(_voice_bus, 0)
 	if is_inf(db) or db < -45.0:

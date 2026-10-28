@@ -518,9 +518,11 @@ func _process(delta: float) -> void:
 		_audio_probe_t += delta
 		if _audio_probe_t >= 1.0:
 			_audio_probe_t = 0.0
+			var dbg := audio.debug_state()
+			dbg["renders"] = stage.stats_renders
 			Engine.get_singleton("JavaScriptBridge").eval(
 					"window.__animAudio = "
-					+ JSON.stringify(audio.debug_state()), true)
+					+ JSON.stringify(dbg), true)
 	# A gallery movie that ended on its own returns to the list.
 	if _gallery_movie != "" and not stage.movie_playing():
 		_gallery_movie = ""
@@ -880,6 +882,7 @@ func _finish_autoplay() -> void:
 	var stats := {"events": _stat_events, "say": _stat_say,
 			"choices": _stat_choice, "effects": _stat_effects,
 			"blinks": stage.stats_blinks,
+			"renders": stage.stats_renders,
 			"ended": _ended, "shots": _shot_beats.keys()}
 	if OS.has_feature("web"):
 		# No filesystem to write stats to and quit() would kill the

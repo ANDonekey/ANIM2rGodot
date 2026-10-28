@@ -53,6 +53,7 @@ var _loading: Dictionary = {}  # slot -> token
 var _pending_pose: Dictionary = {}  # slot -> [label, time_ms]
 
 var stats_blinks := 0
+var stats_renders := 0
 
 
 func _ready() -> void:
@@ -414,6 +415,7 @@ func _phys_offsets(st: Dictionary) -> Dictionary:
 
 
 func _render_slot(slot: int, fade_seconds: float, rvars: Dictionary, offsets: Dictionary) -> void:
+	stats_renders += 1
 	var st: Dictionary = _slots[slot]
 	var model: EmoteModel = st["model"]
 	var parts := model.collect(model.base_chara(), model.base_motion(), rvars, offsets)
@@ -755,7 +757,11 @@ func _drive_slot(slot: int, delta: float) -> bool:
 		var label: String = eye.get("label", "face_eye_open")
 		rv[label] = float(rv.get(label, 0.0)) + round(blink_off / 2.0) * 2.0
 	if talk_label != "" and float(st["talk_v"]) > 0.02:
-		rv[talk_label] = float(rv.get(talk_label, 0.0)) + float(st["talk_v"])
+		# Mouth shapes are discrete levels (talk_v lives on a 0..5
+		# scale): quantize before the value reaches the render
+		# signature, or level jitter re-renders the slot every tick.
+		rv[talk_label] = float(rv.get(talk_label, 0.0)) \
+				+ roundf(float(st["talk_v"]))
 	var offsets := _phys_offsets(st)
 	if _signature(rv, offsets) == st["sig"]:
 		return false
