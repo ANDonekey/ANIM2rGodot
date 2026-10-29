@@ -137,6 +137,15 @@
   不支持自定义顶点属性的问题（改用 `MeshInstance2D` + `ArrayMesh`）。
 - 风险：中。视觉上应与现在逐点计算一致（同一贝塞尔公式）。
 
+**同一轮该做的事：mask 也搬到 GPU。** `docs/emote-driver.md` §4（2026-10-30
+emotedriver.dll 逆向）定性：本作这一代是 TYPE1 纹理内嵌型，mask 为 **α 值
+掩码**，原版走**离屏渲染目标**（`SetRenderTarget` + 视口设置）合成，并不在
+CPU 上逐像素算。而我们的 `_bake_masked_texture` 是 GDScript 逐像素循环
+（图标级分辨率，每个像素做贝塞尔反查 + α 合成），实测 `mask_bakes` 38 次 /
+35 次渲染——命中率高所以不显眼，但它和网格计算是同一类浪费。
+Godot 侧等价做法：`CanvasGroup` + `clip_children`，或给遮罩部件一个采样
+mask 纹理的 shader，让 GPU 做 α 相乘。
+
 ### B. 降低网格分辨率（画质换性能，最快见效）
 
 `WARP_SEG` 5 → 3：点数 36 → 16（-56%），网格计算约 -55%。
@@ -155,6 +164,14 @@
 
 `_render_slot` 的节点更新与 `_plan_parts` 字符串拼接。可改为整数结构键 +
 常驻节点池，预计 -10 ms。收益有限，优先级最低。
+
+### E. 顺带记录：bm 混合模式未接入（正确性，非性能）
+
+同一份 `docs/emote-driver.md` §3 把 `bm` 全链钉死了：6 条
+(BLENDOP, SRCBLEND, DESTBLEND) 三元组，样本里 **796 例 bm=3 = 乘算系**、
+2 例 bm=4 = 屏幕系。播放器目前只透传 `bm`、不参与混合，所以腮红/阴影类
+部件在视觉上是错的（不是性能问题，但同样待排期）。Godot 侧需要按三元组
+写 shader 或材质混合，不能只靠默认 α 混合近似。
 
 ## 6. 复现命令
 
