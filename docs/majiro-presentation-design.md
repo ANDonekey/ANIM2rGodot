@@ -33,12 +33,20 @@ invalidate_enable/disable 各 33、grp_extcopy 28 [8,9]。
 
 - 句柄 = 引擎对象指针，以整数形式交给脚本。校验函数 FUN_004516d0
 （非页返回非零，处理器报错并返回 0，不致命）。
-- 构造器两个：FUN_00451470 = 32bpp 页，FUN_004515f0 = 8bpp 页。
-page_create(w, h, [flag=1])：flag≠0 → 32bpp，否则 8bpp；w/h <1
-报错并钳到 ≥1。
-- 页结构（u32 下标）：[0]=宽 [1]=高 [4]=占用/锁定标志（锁定页作
-grp 目标或改 drawmode 会报错）[5]=has_alfa [6]=drawmode
-[7]=alfa 页指针。
+- 构造器两个：FUN_00451470 = **24bpp BGR 色彩页**，FUN_004515f0
+= 8bpp 索引页（共用分配器 FUN_004514b0，页本体即 GDI DIB
+section）。page_create(w, h, [flag=1])：flag≠0 → 色彩页，否则
+8bpp；w/h <1 报错并钳到 ≥1。
+- 页结构（u32 下标，对象 0x38 B）：[0]=宽 [1]=高（绝对值）
+[2]=行 stride（4 字节对齐：色彩页 ⌈(3w+3)/4⌉×4、8bpp 页
+⌈(w+3)/4⌉×4）[3]=flag 上下文 **[4]=像素格式（0=24bpp BGR、
+非 0=8bpp 索引，分配时定死）** [5]=has_alfa [6]=drawmode
+[7]=alfa 页指针 [8]=BITMAPINFO [9]=调色板指针（仅 8bpp 页，
+构造时初始化为灰度斜坡 i→(i,i,i,0)）[10]=像素 [11]=HBITMAP。
+页另有全局链表（[0xC]=next、[0xD]=prev，表头 DAT_005afde8）。
+初稿把 [4] 读作「锁定标志」是误读，现按格式标志更正：grp_copy
+仅在「24bpp 源 → 8bpp 目标」组合报错、page_drawmode 对 8bpp
+页报错，均为格式约束而非占用。
 - page_create_withalfa：主图按 flag 建，主图 [5]=1，并新建一张 8bpp
 页挂到 [7] 作 alfa 伴生页。
 - page_create_file(name)：名经 FUN_0041fcb0 归一/校验扩展名后由
@@ -48,17 +56,24 @@ FUN_004203a0 经 VFS 加载解码；无法识别/缺失时**不报错**，返回
 拼伴生名（即格式规格 §12.1 的 `_.rc8` 掩码规则），伴生存在则
 加载并置 [5]=1、[7]=伴生页。
 - get_alfapage(x)：x 可为页或 sprite（sprite 先解其页），返回 [7]。
-- page_drawmode(page, mode)：校验 + 未锁定才生效，置 [6]=mode 并
-重建该页的呈现绑定（FUN_0044a3f0）。
-- 屏幕页：内部默认页由 FUN_0044f7d0() 给出；脚本侧可用
-get_frontbuffer（$3E11F2C5）取得。
+- page_drawmode(page, mode)：校验 + **8bpp 页（[4]≠0）报错**，
+置 [6]=mode 并重建该页的呈现绑定（FUN_0044a3f0）。
+- page_release(page)：校验句柄与占用（FUN_00449f20 须通过）后，
+先释 alfa 伴生页、再释本页（FUN_00421340）。
+- 屏幕页：FUN_0044f7d0() 返回全局前台缓冲页 DAT_005afd10；
+脚本侧可用 get_frontbuffer（$3E11F2C5）取得同一页。
 - grp_copy(src, x, y, xl, yl, dst, [dx=0, dy=0])：FUN_00451790 做
 矩形裁剪（越界返回非零则整次跳过），FUN_00459350 执行拷贝；
 **双方都有 alfa 页时连 alfa 通道一并同矩形拷贝**；最后重登记
 dst 的呈现绑定（标脏）。
-- grp_extcopy(src, x, y, xl, yl, dst, [dx, dy, [mode9]])：src 有
-alfa 页走 FUN_00456b30（按 alfa 混合），无则 FUN_00459c60
-（普通拷贝）；第 9 参为附加模式量（默认 0，语义待实现期细究）。
+- grp_extcopy(src, x, y, xl, yl, dst, [dx, dy, [fade9]])：src 有
+alfa 页走 FUN_00456b30（按 alfa 混合），无则 FUN_00459c60。
+第 9 参 = **附加淡化量**（默认 0）：逐像素与源 alfa 相加作混合
+权重（FUN_00460260 实测：有效权重 w=alfa+fade+1，目标权重 w、
+源权重 256−w；w≥255 的像素跳过，参数本身 ≥255 时整次拷贝无
+操作）。**alfa 字节极性：0=不透明、255=全透明**（sprite 合成
+与 `_.rc8` 掩码转 RGBA 时 alpha=255−掩码字节）。目标有 alfa
+页时同步乘算更新（dst_alfa=(src_alfa+1)×dst_alfa>>8）。
 - grp_boxfill(page, x, y, w, h, color)；grp_extboxfill 多一个
 transparency（1=不透明、256=无效）；grp_sepia /
 grp_modcopy / grp_modify_copy / grp_mulcopy 等滤镜系按同一
@@ -66,22 +81,50 @@ grp_modcopy / grp_modify_copy / grp_mulcopy 等滤镜系按同一
 
 ## 4. Sprite 模型
 
-- sprite_create(page, [x, y, xl, yl, [alfa_page]])：argc=1 时源矩形
+- sprite_create(page, [x, y, xl, yl, [page6]])：argc=1 时源矩形
 = 整页；argc 5/6 时给源矩形（xl/yl 钳 ≥1），第 6 参为显式挂接的
-第二页（校验为页），缺省时用 FUN_0044f7d0() 的默认页。
-构造 FUN_0044c0f0。sprite_create_ext = sprite_create 后置
-sprite[+0x3AC]=1（ext 标志）。
+第二页（校验为页），缺省 = 前台缓冲页（FUN_0044f7d0）。
+构造 FUN_0044c0f0：对象 0x62C B，追加到全局 sprite 链表尾；
+第 6 参页另进**引用计数的缩放缓存注册表**（节点 0x24 B，按页
+去重，存降采样尺寸与缓冲，供缩放/旋转绘制取样）——Godot 侧以
+Image 缩放缓存等价实现，接口不变。sprite 字段：[0]=页
+[1/9]=源 x（基准/当前）[2/10]=源 y [3]=xl [4]=yl [5]=第 6 参页
+[0xB]=当前 alfa [0xC]=层组号（初始 = 自身）[0xF9]/[0x141]=
+x/y 缩放（初值 1.0f）。sprite_create_ext = sprite_create 后置
+sprite[+0x3AC]=1（ext 标志，置位后源矩形/表面走 [0xEC..EF]
+自有描述）。
 - sprite_create_file(name$, [x, y, xl, yl]) / _ext：文件版同理。
-- sprite_move(spr, x, y[,?])、sprite_get_pos_x/y、sprite_len_x/y
-（= 源矩形 xl/yl）、sprite_get_page(spr)。
-- sprite_alfa_set(spr, alfa[,?]) 即时值；sprite_alfa_define 为
+- sprite_move(spr, x, y, [dur])：第 4 参 = **动画时长 ms**（缺省
+0 = 即时）；动画状态存 [0x13/14]=起点、[0x15/16]=增量、
+[0x11]=起始时刻、[0xF]=进行标志；处理器把参数拆存
+[0x12]=v&0x84FFFFFF、[0x10]=v&0x78000000（高位为标志/曲线
+保留区，本作任何调用点都不设置：menu 恒 100、yazlib/staffroll
+为名为 $_time 的变量、transit 为逐项数组元素）。
+sprite_get_pos_x/y、sprite_len_x/y（= 源矩形 xl/yl）、
+sprite_get_page(spr)。
+- sprite_release(spr)：摘链 + 脏矩形登记后销毁；sprite[8]≠0 时
+连带释放其主页面与 alfa 页（FUN_0044c920；[8] 的置位者未单独
+反编译，实现期以 pic 库调用点对账为准——这是本节唯一未钉到
+handler 级的细节）。
+- sprite_alfa_set(spr, alfa, [dur])：alfa 为**透明度**（0=不透
+明、255=全透明，与 alfa 页极性一致）；第 3 参 = 淡变时长 ms，
+缺省/0 即时置 [0xB]；非 0 起动画（[0xA3]=起始值、[0xA5]=
+目标、[0xA6]=时长、[0xA0]=起始时刻、[0xA4]=2 动画类型、
+[0x9F]=进行标志；FUN_0044d1e0 实测）。sprite_alfa_define 为
 关键帧列（值/时长交替，argc 奇数 5..13），sprite_alfa_wait 等
 动画结束；sprite_animate_define(spr, frm, spd,...) 为帧动画
 （帧号/速度对列，argc 5..35）；sprite_animate_add 追加一帧；
 sprite_xmodify/ymodify_define(spr, float%, ms,...) 为缩放关键帧
 （浮点百分比 + 时长）；sprite_rotate(spr, deg[,...])。
-- 层序：sprite_priority_high/low(spr[, ref])、_single(a, b) 调整
-合成顺序；sprite_push/pop 保存/恢复层序栈；sprite_paste、
+- 层序（FUN_0044d550 / FUN_0044d330 实测）：**单一双向链表**
+（[0x189]=next、[0x18A]=prev；表头 DAT_0059f7d0、表尾
+DAT_0059f7cc），新建 sprite 追加表尾；绘制按表头→表尾画家序，
+即**表头 = 最下层、表尾 = 最上层**。priority_high(spr) 把 spr
+摘链重插至表尾（最上），priority_low(spr) 重插至表头（最下）；
+带 ref 的 2 参形式插到 ref 相邻处并越过与 ref 同层组
+（[0xC]）的连续段、且 spr 继承 ref 的层组号；_single 形式推定
+为只紧邻 ref 插入、不越段（未单独反编译，按命名与 2 参实现
+推断）。sprite_push/pop 保存/恢复层序栈；sprite_paste、
 sprite_page_auto_release、sprite_clip 为辅助。
 - 合成时机：引擎主循环按层序把 sprite 合成到 frontbuffer；
 invalidate_enable/disable 门控自动刷新，draw_wait 等待一次呈现。
@@ -95,7 +138,15 @@ invalidate_enable/disable 门控自动刷新，draw_wait 等待一次呈现。
 - console_set(page, x, y, xl, yl)：置全局文本域 {page, x, y,
 cur_x=x, cur_y=y, xl, yl}；page 非页时报错并回退默认页。
 旧签名记作 (int, x, y, xl, yl)，首参实为页句柄。
-- console_font(name$, yl, xl, ystep, proportional)、
+- console_font(name$, yl, xl, ystep, proportional)：处理器
+（FUN_0041dd50）把名称与四个尺寸量格式化为描述符串、经
+FUN_0041d320 查找/创建字体对象；默认字体名来自 fastdata.arc
+的 sysdata.cfg（load_sysdata 读取）= **ＭＳ 明朝**（OS 字体名，
+非包内资源），默认 yl=24、xl=12、ystep=35、proportional=0，
+可经 $#confont_*@SYSTEM 持久覆盖。**本播放器的实现决策
+（2026-10-29 用户拍板）：固定选一种明朝系系统字体，不做字体
+名解析/映射；console_font 仅尺寸参数生效。** 汉化组的
+Longinus 字体钩子是外挂，不进播放器。
 console_color(a, b)、console_locate(_force)(x, y)、
 console_curpos_x/y()、console_cls()、console_redraw(t)。
 - console_on(a, b)：首次开启时以哈希回调脚本函数
@@ -138,8 +189,10 @@ _resume/_stat/_wait + _push/_pop/_replace（栈式 BGM 管理）。
 syscalls 表），内部模型与引擎同构：
 
 - **Page 池**：id → {image: Image（RGBA8 或 L8), alfa: PageId,
-drawmode, locked}。32bpp 页 = FORMAT_RGBA8，8bpp 页 =
-FORMAT_L8（alfa 页/灰度）。page_create_file 走玩家 VFS +
+drawmode, format}。原版色彩页为 24bpp BGR + 独立 alfa 伴生页，
+Godot 侧色彩页以 FORMAT_RGBA8 承载（alpha 通道闲置或由伴生页
+合成时写入），8bpp 页 = FORMAT_L8（alfa 页/灰度）。掩码转
+alpha 时注意极性反转（见 §3）。page_create_file 走玩家 VFS +
 MajiroRct 解码（含 TC01 底图合成与 `_.rc8` 掩码挂接）。
 - **呈现**：Stage 根为 1024×768 的 CanvasLayer；每 sprite 一个
 TextureRect/Sprite2D（纹理 = 页 Image 的 ImageTexture，
@@ -178,14 +231,26 @@ page_create_file(_withalfa) → 标题画面渲染与原版对账。
 5. **动画与转场**：alfa/animate/xmodify 关键帧 + transit 库自洽
 → 淡入淡出/立绘动画与原版对账。
 
-## 10. 未决问题（实现期逐项钉，不阻塞设计批准）
+## 10. 原「未决问题」的钉死结论（2026-10-30，REA 链 8/8b 全量实测）
 
-- grp_extcopy 第 9 参的精确语义；grp_copy 中页 [4] 锁定标志的
-置位/清除者（疑为 sprite 引用计数或呈现占用）。
-- sprite_move 第 4 参、sprite_alfa_set 第 3 参的可选参语义。
-- sprite 层序的精确数据结构（priority_high/low 的相对语义）与
-frontbuffer 的合成次序（sprite 在 frontbuffer 页内容之上/之下）。
-- console 呈现的字体来源：console_font 的 name$ 在包内对应何种
-字体资源（Longinus 钩子替换字体的关系），Godot 侧用系统字体
-还是包内字库需在第 2 期前钉死。
-- movie_*（OP 动画 MPG）不在本设计范围，另行立项。
+初稿列出的未决项已逐项钉死，结论已并入 §3/§4/§5 正文，此处
+只作索引：
+
+- **grp_extcopy 第 9 参** = 附加淡化量（与源 alfa 相加作混合
+权重，见 §3）；**页 [4]** 不是锁定标志，而是像素格式标志
+（0=24bpp BGR、非 0=8bpp 索引，分配器 FUN_004514b0 定死，
+见 §3）——初稿的锁定读法就此撤销。
+- **sprite_move 第 4 参** = 动画时长 ms（高位标志区本作未用）；
+**sprite_alfa_set 第 3 参** = 淡变时长 ms；alfa 极性为
+0=不透明、255=全透明（见 §4）。
+- **sprite 层序** = 单一双向链表，表头最下、表尾最上，画家序
+合成到 frontbuffer（frontbuffer 是链表之下的底页，sprite 恒
+在其上）；priority_high/low = 摘链重插至表尾/表头，2 参形式
+带层组（[0xC]）语义（见 §4）。
+- **console 字体** = OS 字体名（默认 ＭＳ 明朝，源自
+sysdata.cfg）；本播放器固定选一种明朝系系统字体、只取尺寸
+参数，Longinus 钩子不进播放器（见 §5，用户 2026-10-29 拍板）。
+- 唯一未钉到 handler 级的残项：sprite[8]（release 时连带释页
+的标志）的置位者，实现期以 pic 库调用点对账为准，不影响
+分期接口。
+- movie_*（OP 动画 MPG）不在本设计范围，另行立项（不变）。
