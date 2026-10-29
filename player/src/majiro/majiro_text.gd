@@ -2,13 +2,15 @@ class_name MajiroText
 extends RefCounted
 ## Legacy-encoding text decoding for Majiro script strings.
 ##
-## Tables (src/majiro/cp932.bin, gbk.bin) are generated from the platform
-## codecs: 256 u16 single-byte entries (0xFFFF = double-byte lead), then
-## 65536 u16 pair entries indexed by (lead << 8) | trail; 0xFFFD replaces
-## unmapped sequences. Decoded codepoints are emitted as UTF-8.
+## Tables (src/majiro/cp932.b64, gbk.b64) are generated from the platform
+## codecs by generate_tables.py and stored as base64(gzip(table)): 256 u16
+## single-byte entries (0xFFFF = double-byte lead), then 65536 u16 pair
+## entries indexed by (lead << 8) | trail; 0xFFFD replaces unmapped
+## sequences. Decoded codepoints are emitted as UTF-8.
 
-const CP932_PATH := "res://src/majiro/cp932.bin"
-const GBK_PATH := "res://src/majiro/gbk.bin"
+const CP932_PATH := "res://src/majiro/cp932.b64"
+const GBK_PATH := "res://src/majiro/gbk.b64"
+const TABLE_SIZE := 131584
 
 static var _tables := {}
 
@@ -16,7 +18,8 @@ static var _tables := {}
 static func _table(path: String) -> PackedByteArray:
 	if _tables.has(path):
 		return _tables[path]
-	var data := FileAccess.get_file_as_bytes(path)
+	var packed := Marshalls.base64_to_raw(FileAccess.get_file_as_string(path).strip_edges())
+	var data := packed.decompress(TABLE_SIZE, FileAccess.COMPRESSION_GZIP)
 	_tables[path] = data
 	return data
 
