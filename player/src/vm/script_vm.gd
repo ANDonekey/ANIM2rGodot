@@ -300,7 +300,14 @@ func run_until_event() -> Dictionary:
 				_effect("unlock_movie", {"name": sce.pool_str(ops[0])})
 				pc += 1
 			0x8E, 0x8F:
-				_effect("movie", {"name": sce.pool_str(ops[1])})
+				# The opcode flag IS the loop flag (pinned 2026-10-30
+				# against the exe: FUN_00425530's 2nd arg lands in the
+				# player object at +0x2E, and the wait pump seeks back
+				# to 0 on EC_COMPLETE when it is 1) — 0x8E plays once,
+				# 0x8F loops. Dropping it made KF loop animations stop
+				# on their last frame.
+				_effect("movie", {"name": sce.pool_str(ops[1]),
+						"loop": op == 0x8F})
 				pc += 1
 			0x82:
 				_effect("bgm_play", {"track": ops[0]})

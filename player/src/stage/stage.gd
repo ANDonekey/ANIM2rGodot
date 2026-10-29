@@ -192,7 +192,7 @@ func movie_placeholder(movie_name: String) -> void:
 ## of every movie, which Godot plays natively — download it and play
 ## fullscreen. Native packages still have only MPEG-1, so they keep
 ## the placeholder until the pl_mpeg extension lands.
-func play_movie(movie_name: String) -> void:
+func play_movie(movie_name: String, loop := false) -> void:
 	if pkg != null and pkg.is_web() and pkg.movie_ogv_rel(movie_name) != "":
 		_movie_req += 1
 		var token := _movie_req
@@ -202,6 +202,8 @@ func play_movie(movie_name: String) -> void:
 		var stream := VideoStreamTheora.new()
 		stream.file = path
 		_video.stream = stream
+		# 0x8F loops (KF/HC loop animations), 0x8E plays once.
+		_video.loop = loop
 		_video.visible = true
 		_video.play()
 		return

@@ -718,7 +718,7 @@ func _apply_effect(e: Dictionary) -> void:
 			stage.show_image(e["name"])
 			_seen_bg = true
 		"movie":
-			stage.play_movie(e["name"])
+			stage.play_movie(e["name"], bool(e.get("loop", false)))
 		"bgm_play":
 			audio.play_bgm(e["track"])
 		"bgm_stop":
