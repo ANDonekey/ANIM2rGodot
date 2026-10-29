@@ -219,3 +219,108 @@ entry 结构（16 字节）：
 - 名字对账：哈希是对标识符全名（含类型/作用域修饰）的标准 CRC32
   （majiro-py `crypt.hash32`），名↔哈希用其 known_hashes 库对账，
   实现期逐条落名。
+
+## 11. 运行时语义补遗（实测，VM 实现期 2026-10-29）
+
+- **启动顺序**（WinMain FUN_0042e480）：注册 VFS 搜索族（update12…update、
+  fastdata12…fastdata、scenario…等，update 族最先）；加载 `start`，先解析并
+  执行其 `$init@GLOBAL`（即各脚本偏移 0 处的函数，负责 load_library 全部
+  库脚本），之后才以头 entrypoint 偏移进入 `$$main@GLOBAL`。脚本重启动作
+  同理：按名加载、以 entrypoint 进入 $$main（偏移为 -1 则致命错误）。
+- **标识符哈希形式**：函数名以 `$名@组` 的完整形式做标准 CRC32，
+  实测 `$main@GLOBAL` = 0x1D128F30、`$init@GLOBAL` = 0xB1BB8ADC
+  （MjIL 显示的 `$$main` 是展示层再加的函数标记，不入哈希）。
+- **相对偏移基准**：一切相对偏移都相对于「该偏移字段自身的末尾」——
+  分支指令即指令末尾（pc 在处理器执行时已越过整条指令），switch 的每个
+  case 偏移相对于该 case 条目自身的末尾（at + 8 + 4·i + case[i]）。
+  社区文档「相对指令起点」的说法不确。
+- **变量模型**：hash 作用域（persistent/savefile/thread）以 (哈希→单元数组)
+  存储、offset 索引单元；**local 作用域是每帧一个数组、offset 即槽号**
+  （实测同一函数 79 个 local 变量 offset 互不冲突、最大 100；alloca 的
+  类型表即帧槽位表）。offset = -2 为数组长度伪元素（hash 作用域）；
+  offset = -1 为合成单值单元，语料中仅 `$__SYS__NumParams`
+  （0xA704BDBD，171 处）使用，读值 = 当前帧实参个数。
+- **load_library**（syscall 0x10DB0A43/44）：引擎加载器对脚本名做
+  大小写折叠（脚本里写 `UserTrans`、包内文件是 `usertrans.mjo`）。
+- **add.s 的类型强制**：数值操作数会被字符串化后拼接（pic 库以此拼
+  文件名）；字符串比较同样对操作数做字符串强制。int 除法向零截断、
+  除零得 0（与 MajiroTools 文档的怪癖表一致）。
+- st 族存值后保留栈顶值（编译器随后以 pop 丢弃），stelem 的栈序为
+  [值, 索引…]（值在最深处）；stp/stelemp 为存后弹出版本。
+
+## 12. 图像格式 .rct / .rc8（实测，2026-10-29）
+
+- 通用头（20 B）：`98 5A 92 9A`（「六丁」）+ 4 字符签名 + u32 宽 + u32 高
+  + u32 数据长。签名：rct 为 TC00/TC01（明文）或 TS00/TS01（XOR 加密，
+  本样本未见）；rc8 为 `8_00`。样本图多为 1280×960（客户端 1024×768，
+  引擎缩放呈现）。
+- **TC01**：头后 u16 底图名长（含 NUL）+ CP932 底图文件名，随后才是
+  本图数据。合成规则：本图像素覆盖底图，**纯红 #FF0000 为透明**（露出
+  底图）；底图可递归。实测 bg04a（99.1% 透明、11,014 像素变更）合成
+  无缝。
+- **rc8**：头后 256×RGB 调色板（**RGB 序**，与 rct 的像素 BGR 序相反），
+  随后是索引数据流；引擎中常用作 rct 的 alpha 通道（配对在图形层）。
+- **数据流 = LZ77 指令流**：首像素原始字节；其后命令字节循环——
+  bit7=0 为直读（count=cmd，0x7f 时再加 u16；实际像素数 count+1）；
+  bit7=1 为回拷（count=cmd&CountMask，取满时再加 u16；像素数
+  count+CountBase；shift 索引 =(cmd&0x7f)>>ShiftStart，查宽度相关的
+  移位表得「像素偏移」= (s>>4) − (s&0xF)×宽，乘字节深度得字节偏移，
+  自当前位置之前重叠拷贝）。
+  参数：rct 深度 3、移位表 32 项、ShiftStart 2、CountMask 0x3、
+  CountBase 1；rc8 深度 1、移位表 16 项、ShiftStart 3、CountMask 0x7、
+  CountBase 3。移位表本体见 MajiroTools wiki（Format: Rct image）。
+- 验证：Python 参考解码 263 张（data1 全量 + 其余 arc 抽样）全部精确
+  消费 DataSize；bg13/bg01/ea03/ea04 等整图与 bg04 合成图目视无误；
+  GDScript 实现（MajiroRct）与参考 md5 对账 24 张全同（TC00/TC01/8_00）。
+
+## 13. 既読 readmark（实测，2026-10-29）
+
+- .mjo 头 +0x14 = 该脚本的**文本行数**（majiro-py 旧称 line_count）：
+  与 savedata/majiro_readmark.mss 中 227 条记录的 text_count **逐条全等**。
+- readmark.mss = 条目序列（无文件头），每条：128 B 脚本名（CP932、
+  大写 .MJO）+ u32 bitmap 字节数 + u32 text_count + 3×u32 残留指针
+  （写出进程的链表地址，读时忽略）+ bitmap 本体。
+  bitmap 字节数恒 = ⌈text_count/8⌉ + 16，与加载器为每脚本分配的
+  ⌈field_0x14/8⌉ + 16 B 位图一致；每 bit 对应一行文本的已读标记。
+
+## 14. 存档文件（结构初探，2026-10-29）
+
+- `majiro_NNNN.sav`：16 B 头 `MajiroSavV1.103\0`，其后为 CP932 存档
+  标题（定长填充），主体为线程/变量的序列化状态；文件中段可见以
+  记录形式存入的脚本名（如 `STARLESS.MJO`）。完整解码需对照 exe 的
+  存/读档函数，后续专项处理。
+- `majiro_system.mss`：16 B 头 `MajiroSysV1.100\0` + u32 计数/尺寸
+  字段，其后数据高熵（疑似加密或压缩的全局变量存储），未解。
+- `majiro_readmark.mss`：见 §13（已完全钉死）。
+
+### 12.1 伴随掩码与加密变体（GARbro 源码交叉验证，2026-10-29）
+
+- GARbro 的独立实现（ArcFormats/Majiro/ImageRCT.cs）与 §12 的头格式、
+  LZ 参数、TC01 纯红透明合成规则完全一致（交叉验证通过）。
+- **掩码伴随文件**：`<名>_.rc8` 是同名 .rct 的 alpha 掩码（掩码像素经
+  其调色板取灰度均值再取反作 alpha）。STARLESS 实测：data2.arc 中
+  约 2,107 个 `_.rc8` 条目（全包 rc8 共 2,170 个）——绝大多数 rc8
+  是掩码而非独立图片，立绘类素材应按 rct+掩码合成 RGBA。
+- **TS00/TS01 加密变体**：数据段与 1024 B 密钥 XOR；密钥由口令派生：
+  key32[i] = crc32(口令的 CP932 字节) XOR crc32 表[(i + crc32) & 0xFF]；
+  口令可由 scenario.arc 的 start.mjo 中提取（GARbro FindImageKey）。
+  STARLESS 样本无 TS 文件，未实测。
+
+## 15. br.case / bsel / switch 语义（REA 实测，2026-10-29）
+
+- **br.case（0x830）**：把栈顶被比较值存入线程内部变量
+  `%Op_internalCase~@MAJIRO_INTER`（哈希 0x11F91FD3，经 FUN_00425c00
+  单元解析器），弹出，随后无条件跳到检查链首。
+- **bXX.case（0x831/832/833/838/839）**：把内部变量与栈顶常量（保留
+  不弹）比较，**关系成立则跳到下一检查、不成立则落入 case 本体**：
+  bne=≠、bge=≥、ble=≤、blt=<、bgt=>（FUN_00413970/FUN_00413a00 实测，
+  ble/blt/bgt 为同族对称推断）。编译形态：每 case 先 ldc 常量再 bXX.case。
+- **switch（0x850，FUN_00413370）**：索引越界（负或 ≥ 计数）时取
+  **最后一项**作默认；case 偏移相对该条目自身末尾（与 §11 统一规则同）。
+- **bsel.\***：按钮选择的目标登记机。帧字段 [5][6][7] 存三个按钮的
+  跳转目标、[8] 存锚点；线程块 +0x4c38/3c/40 是输入层置位的按钮锁存。
+  bsel.1/2/3 登记对应目标、锁存已置位则消费并跳转（FUN_004133e0）；
+  bsel.x 同一目标登记三键（FUN_00413500）；bsel.clr 清 [5..7]；
+  bsel.4 只记锚点不跳；bsel.jmp.4 沿帧栈回退到持有锚点的帧并跳转
+  （FUN_00413600）。无输入环境下锁存永不置位，登记后顺序执行。
+- VM 实现后启动流回归：**未处理项 0**，步数/调用/syscall 数与此前一致。
