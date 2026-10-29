@@ -99,6 +99,37 @@ entry 结构（16 字节）：
 4. .rct/.rc8 解码器（按文档实现 + 与原版截图对照验证，同 ANIM 的真值台方法；
    原版可在同一台 instabox 主机的 Wine 下运行）。
 
+## 8. 社区生态普查（2026-10-29，逐项核查）
+
+- **不存在任何 Majiro 运行时/播放器重实现**（开源、闭源免费、跨平台均无；
+  唯一被宣传过的 KrKr2「Majiro 支持」从未发布，仓库只含 Kirikiri 本体）。
+  本分支即首个 Majiro 播放器，与 ANIM 侧的定位相同。
+- 现有成果全在工具侧：majiro-py（反汇编/汇编 + 格式文档，最完整）、
+  MajiroTools（C# 工具 + Wiki：完整操作码表、**163 条 syscall 的权威名表与参数**、
+  1839 条已知哈希名）、VNTextPatch（文本提取/回填，其 MajiroDisassembler 可作
+  指令编码的第二参照）、GARbro（arc 提取，C# 实现可作 V1/V2/V3 对照）、
+  arc_conv（arc 打包，证实还存在 MajiroArcV4；本样本为 V3）。
+- 实现方针：格式与语义以 majiro-py + MajiroTools Wiki 为文档基线，
+  以本样本实测与原版 exe 的反编译（REA）为裁决。
+
+## 9. STARLESS 数据行为普查（实测，477 个 .mjo 全量反汇编）
+
+- 指令总数 896,634；`text` 指令 101,892 条（全作对白/旁白量）；
+  `ctrl` 199,911（文本控制）、`callp` 186,014、`line` 109,582（源码行号保留）。
+- **实际用到的 syscall 名共 289 个**（含同名 syscall 的类型签名变体，
+  名尾 `#`/`$` 即 MjIL 的返回类型标记；与引擎名表 163 条的差额构成待逐项对账）。
+  大头：`sound` 族（sound/sound2/3/4
+  + vol/fadeout/stop，合计约 2 万次）、`wait`、`file_read`、`sprite_*` / `page_*` /
+  `grp_*`（页面-精灵图形模型）、`thread_begin/end`（脚本多线程）、
+  `areaevent_set` / `event_hook`（点击热区）、`fontout*`（页面直写文字）。
+- 函数调用目标 285 个：118 个可由社区哈希库命名（按组分工明确——
+  `@KOEKOE` 语音/声音、`@PIC` 画面切换、`@MENU` 选择肢、`@CONFIG`、`@CGMODE`、
+  `@BUTONMENU`、`@CONSOLE`）；167 个未命名者是游戏自有库函数（定义就在语料的
+  其它 .mjo 里，可由函数表按哈希建全局索引自解）。调用量第一的
+  `$e1751505`（99,005 次，几乎每句对白前调用一次）即属此类。
+- 图形模型要点：脚本以 page（离屏图像缓冲）+ sprite（显示对象）为基本单位，
+  与 ANIM 的部件合成模型不同，呈现层需按 Majiro 语义新建。
+
 ## 7. 未决问题
 
 - .mjo 头 +0x14 字段的语义。
