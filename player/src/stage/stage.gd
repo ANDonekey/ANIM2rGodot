@@ -988,8 +988,13 @@ func _drive_slot(slot: int, delta: float) -> bool:
 	# build a 300 ms evaluation stretches it so rendering cannot starve
 	# everything else.
 	st["drv_t"] = float(st["drv_t"]) + delta
-	var drv_interval := clampf(1.5 * float(st.get("last_ms", 0.0)) / 1000.0,
-			0.05, 0.30)
+	# The coalesce cap doubles when no pose transition is running:
+	# talk-level and blink re-renders are then spread further apart so
+	# a 100-300 ms evaluation cannot eat most of the frame budget.
+	# Transitions stay tight to keep pose changes smooth.
+	var drv_cap := 0.15 if st["trans"] != null else 0.45
+	var drv_interval := clampf(2.0 * float(st.get("last_ms", 0.0)) / 1000.0,
+			0.08, drv_cap)
 	var rv: Dictionary = (st["rvars"] as Dictionary).duplicate()
 	if blink_off > 0.0:
 		var label: String = eye.get("label", "face_eye_open")

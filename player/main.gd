@@ -303,10 +303,21 @@ func _load_scenes_pf() -> void:
 				_pf_marks.append([int(_sce.record_index[off]), i])
 	_pf_marks.sort_custom(func(a: Array, b: Array) -> bool:
 			return a[0] < b[0])
+	# The script's opening prologue plays before the first _SYSLABEL_,
+	# so the per-frame crossing check never fires for it: prefetch the
+	# first two segments right away or the opening lines race their
+	# own download (and on a slow link lose it, muting the CV).
+	if not _pf_marks.is_empty():
+		_prefetch_scene(0)
+		_prefetch_scene(1)
 
 
 ## Background-fetch one scene segment's assets (web caches dedupe
 ## and the LRU budgets the memory; already-played content is a hit).
+## Voice entries are fetched ONE AT A TIME in the scene's first-use
+## order: firing every entry at once (a scene can carry 60+) floods
+## the link and starves the on-demand fetch of the line on screen,
+## which is exactly the fetch that must land within one reading gap.
 func _prefetch_scene(i: int) -> void:
 	if i < 0 or i >= _scenes_pf.size() or _pf_done.has(i):
 		return
@@ -314,9 +325,9 @@ func _prefetch_scene(i: int) -> void:
 	var sc: Dictionary = _scenes_pf[i]
 	for key in ["voices", "bgv", "se"]:
 		for nm in sc.get(key, []):
-			pkg.ensure_voice(str(nm))
+			await pkg.ensure_voice(str(nm))
 	for nm in sc.get("images", []):
-		pkg.ensure_image(str(nm))
+		await pkg.ensure_image(str(nm))
 	for t in sc.get("bgm", []):
 		pkg.ensure_bgm(int(t))
 
@@ -328,7 +339,7 @@ func _new_vm(request: int) -> void:
 	audio.stop_bgm()
 	audio.stop_voice()
 	_apply_bgv_gain(false)
-	audio.stop_bgv()
+	audio.stop_all_bgv()
 	audio.stop_se()
 	vm = ScriptVM.new(_sce)
 	vm.recollection_request = request
@@ -714,8 +725,10 @@ func _apply_effect(e: Dictionary) -> void:
 			audio.stop_bgm()
 		"bgm_fade":
 			audio.fade_bgm(e["ms"])
-		"voice_play":
-			audio.play_bgv(e["name"])
+		"bgv_play":
+			audio.play_bgv(int(e["ch"]), e["name"])
+		"bgv_stop":
+			audio.stop_bgv(int(e["ch"]))
 		"se_play":
 			audio.play_se(e["name"])
 		"emote_load":
@@ -945,6 +958,9 @@ func _finish_autoplay() -> void:
 			"blinks": stage.stats_blinks,
 			"renders": stage.stats_renders,
 			"render_ms": snappedf(stage.stats_render_ms, 0.1),
+			"collect_ms": snappedf(stage.stats_collect_ms, 0.1),
+			"cprof": stage.collect_profile(),
+			"fast": stage.stats_fast,
 			"mask_bakes": stage.stats_mask_bakes,
 			"mask_hits": stage.stats_mask_hits,
 			"ended": _ended, "shots": _shot_beats.keys()}

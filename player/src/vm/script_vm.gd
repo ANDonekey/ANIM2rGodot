@@ -311,8 +311,19 @@ func run_until_event() -> Dictionary:
 			0x84:
 				_effect("bgm_fade", {"ms": ops[0]})
 				pc += 1
-			0x88:
-				_effect("voice_play", {"name": sce.pool_str(ops[1])})
+			0x88:  # multi-channel looping ambience (BGV): the original
+				# runs channels 1/2 (environment beds) and 6/9/10/11/12
+				# (background-voice layers) in parallel, each addressed
+				# independently. Measured over the full script: 965
+				# plays, 525 stops (0x89).
+				_effect("bgv_play", {"ch": ops[0],
+						"name": sce.pool_str(ops[1])})
+				pc += 1
+			0x89:  # stop one BGV channel (operand = channel number).
+				# Without this the fire / bed loops never ended: a new
+				# ambience replaced the old one, and a scene that stops
+				# its bed left the previous loop running forever.
+				_effect("bgv_stop", {"ch": ops[0]})
 				pc += 1
 			0x8B:  # one-shot SE on the SE channel (slot is almost
 				# always 1). Verified 2026-10-29 against the original

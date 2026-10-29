@@ -40,6 +40,11 @@ var _layer_offsets: Dictionary = {}
 ## flat (4-corner) grids - the full warp tessellation is wasted on
 ## parts that are never drawn. The test suite leaves this off so the
 ## output stays bit-comparable with the Python reference evaluator.
+## fast also enables two gameplay-only memo layers (both pure caches,
+## never changing results): per-(layer, time) frame evaluation and the
+## grid cache below. Drivers (blink / lip sync / springs) re-render a
+## slot many times per second and every render re-walks the whole
+## pose; with ~800 parts the memo is what keeps wasm renders sane.
 var fast := false
 ## Web packages preprocessed by web_preprocess.py store texture
 ## chunks already channel-swapped; texture_image() then skips its
@@ -65,7 +70,7 @@ var stat_parts := 0
 ## must not see; the stage enables it for gameplay (like `fast`).
 var grid_cache := false
 var _grid_cache: Dictionary = {}
-var _grid_lru: Array[String] = []
+var _grid_lru: Array = []  # cache keys (packed int arrays)
 var _grid_sizes: Dictionary = {}
 var _grid_points := 0
 const GRID_CACHE_POINTS := 1500000
@@ -397,6 +402,68 @@ static func _chain_point(segs: Array, p: Vector2) -> Vector2:
 	return Vector2(px, py)
 
 
+## Precomputed transform plan for a segment chain: the affine-only
+## levels between warps are composed into single transforms, so a
+## point transform costs O(#warps) matrix applications instead of
+## O(depth). Numerically equal to _chain_point up to float
+## associativity (~1e-9); tests/test_chain_compose.gd pins this.
+## NOTE: translations/matrices are plain-float arrays, NOT Vector2 —
+## Vector2 is 32-bit in standard builds and the reference loop
+## accumulates in 64-bit scalars.
+static func chain_plan(segs: Array) -> Array:
+	var plan: Array = []
+	var tx := 0.0
+	var ty := 0.0
+	var cm: Array = [1.0, 0.0, 0.0, 1.0]
+	var open := false
+	for i in range(segs.size() - 1, -1, -1):
+		var seg: Array = segs[i]
+		if seg[3] != null:
+			if open:
+				plan.append([false, [tx, ty], cm])
+			plan.append([true, seg[3], null])
+			tx = 0.0
+			ty = 0.0
+			cm = [1.0, 0.0, 0.0, 1.0]
+		var m: Array = seg[2]
+		var nx: float = m[0] * tx + m[1] * ty + float(seg[0])
+		var ny: float = m[2] * tx + m[3] * ty + float(seg[1])
+		tx = nx
+		ty = ny
+		cm = _mat_mul(m, cm)
+		open = true
+	if open:
+		plan.append([false, [tx, ty], cm])
+	return plan
+
+
+static func chain_point_fast(plan: Array, p: Vector2) -> Vector2:
+	var px := p.x
+	var py := p.y
+	for step in plan:
+		if step[0]:
+			# inline _warp_point with 64-bit scalars: re-boxing into a
+			# Vector2 (32-bit) before each warp would lose precision the
+			# reference loop keeps
+			var warp: PackedFloat32Array = step[1]
+			var ww: float = warp[32]
+			var wh: float = warp[33]
+			if ww > 0.0 and wh > 0.0:
+				var wox: float = warp[34]
+				var woy: float = warp[35]
+				var n := _bezier_patch(warp, (px + wox) / ww, (py + woy) / wh)
+				px = n.x * ww - wox
+				py = n.y * wh - woy
+		else:
+			var t: Array = step[1]
+			var m: Array = step[2]
+			var nx: float = t[0] + m[0] * px + m[1] * py
+			var ny: float = t[1] + m[2] * px + m[3] * py
+			px = nx
+			py = ny
+	return Vector2(px, py)
+
+
 static func _parse_blank(icon: Variant) -> Variant:
 	# blank icon name "W:H:OX:OY" -> [w, h, ox, oy] or null
 	if not (icon is String):
@@ -523,12 +590,39 @@ func _frame_content(frame_list: Array, time: float) -> Variant:
 	return base
 
 
+## Memoized _frame_content for gameplay (fast mode): the result is a
+## pure function of the frameList node and the motion time, and during
+## driver animation almost every layer's time is unchanged between
+## renders — only the eye / mouth / transition layers re-evaluate.
+## The memo lives on the layer node (persistent across collects) and
+## stores OUR OWN result dicts, which nothing mutates afterwards.
+## Off in the test suite so outputs stay bit-comparable there.
+const FRAME_MEMO_MAX := 24
+
+
+func _frame_for(node: Dictionary, frame_list: Array, t: float) -> Variant:
+	var memo: Dictionary = node.get("_fmemo", {})
+	if memo.has(t):
+		return memo[t]
+	var frame: Variant = _frame_content(frame_list, t)
+	if memo.size() >= FRAME_MEMO_MAX:
+		memo.erase(memo.keys()[0])
+	memo[t] = frame
+	node["_fmemo"] = memo
+	return frame
+
+
 ## Warp descriptor for a frame, in its own frame space; null when the
 ## frame carries no mesh or its icon size is unknown (motion references
-## have neither).
+## have neither). Memoized on the frame dict: with frame memoization
+## the dict instance is stable across collects, and the warp array is
+## read-only downstream (grid math + cache keys).
 func _frame_warp(frame: Dictionary) -> Variant:
+	if frame.has("_warp"):
+		return frame["_warp"]
 	var bp: Variant = frame["mesh_bp"]
 	if bp == null:
+		frame["_warp"] = null
 		return null
 	var src: String = frame["src"]
 	var w := 0.0
@@ -562,13 +656,19 @@ func _frame_warp(frame: Dictionary) -> Variant:
 	warp[33] = h
 	warp[34] = ox
 	warp[35] = oy
+	frame["_warp"] = warp
 	return warp
 
 
 func _build_ctx(layer: Dictionary, frame: Dictionary, parent: Ctx) -> Ctx:
 	var order: Array = layer.get("transformOrder", [0, 3, 2, 1])
-	var local := _calc_affine(order, frame["fx"], frame["fy"], frame["angle"],
-			frame["zx"], frame["zy"], frame["sx"], frame["sy"])
+	# The affine depends only on the frame (transformOrder is constant
+	# per layer) — memoize it on the frame like the warp.
+	var local: Array = frame.get("_affine", [])
+	if local.is_empty():
+		local = _calc_affine(order, frame["fx"], frame["fy"], frame["angle"],
+				frame["zx"], frame["zy"], frame["sx"], frame["sy"])
+		frame["_affine"] = local
 	var pm := parent.matrix
 	var tx: float = pm[0] * frame["cx"] + pm[1] * frame["cy"]
 	var ty: float = pm[2] * frame["cx"] + pm[3] * frame["cy"]
@@ -691,7 +791,11 @@ func _travel(node: Variant, chara: String, mo: Variant, vars_: Dictionary,
 			t = _ambient_time(mo, vars_)
 		else:
 			t = 0.0
-		var frame: Variant = _frame_content(node["frameList"], t)
+		var frame: Variant
+		if fast:
+			frame = _frame_for(node, node["frameList"], t)
+		else:
+			frame = _frame_content(node["frameList"], t)
 		var stack2 := label_stack.duplicate()
 		stack2.append([inst, node.get("label", "")])
 		var clip: Variant = ctx.clip
@@ -757,7 +861,7 @@ func _grid_for(ctx: Ctx, w: float, h: float, ox: float, oy: float,
 			_grid_points += npts
 			while _grid_points > GRID_CACHE_POINTS \
 					and _grid_lru.size() > 1:
-				var victim: String = _grid_lru.pop_front()
+				var victim: Variant = _grid_lru.pop_front()
 				_grid_points -= int(_grid_sizes.get(victim, 0))
 				_grid_sizes.erase(victim)
 				_grid_cache.erase(victim)
@@ -768,26 +872,27 @@ func _grid_for(ctx: Ctx, w: float, h: float, ox: float, oy: float,
 ## Quantized cache key for a warped grid: segment translations and
 ## matrices at 0.005 px steps, warp control data likewise — slow
 ## driver motion then produces stable keys, and the geometric error
-## from a hit is below render resolution.
-func _grid_key(ctx: Ctx, w: float, h: float, ox: float, oy: float) -> String:
-	var parts := PackedStringArray()
-	parts.append(str(int(round(w * 200.0))) + "," + str(int(round(h * 200.0)))
-			+ "," + str(int(round(ox * 200.0))) + ","
-			+ str(int(round(oy * 200.0))))
+## from a hit is below render resolution. Packed-int key (content
+## hashed): string building dominated the hit path before.
+func _grid_key(ctx: Ctx, w: float, h: float, ox: float, oy: float) -> PackedInt64Array:
+	var key := PackedInt64Array()
 	for seg in ctx.segs:
+		key.append(int(round(float(seg[0]) * 200.0)))
+		key.append(int(round(float(seg[1]) * 200.0)))
 		var m: Array = seg[2]
-		var s := str(int(round(float(seg[0]) * 200.0))) + ","
-		s += str(int(round(float(seg[1]) * 200.0))) + ","
 		for i in 4:
-			s += str(int(round(float(m[i]) * 200.0))) + ","
+			key.append(int(round(float(m[i]) * 200.0)))
 		if seg[3] == null:
-			s += "x"
+			key.append(-9223372036854775807)
 		else:
 			var warp: PackedFloat32Array = seg[3]
 			for i in warp.size():
-				s += str(int(round(warp[i] * 200.0))) + ","
-		parts.append(s)
-	return "|".join(parts)
+				key.append(int(round(warp[i] * 200.0)))
+	key.append(int(round(w * 200.0)))
+	key.append(int(round(h * 200.0)))
+	key.append(int(round(ox * 200.0)))
+	key.append(int(round(oy * 200.0)))
+	return key
 
 
 func _grid_for_impl(ctx: Ctx, w: float, h: float, ox: float, oy: float,
@@ -802,10 +907,19 @@ func _grid_for_impl(ctx: Ctx, w: float, h: float, ox: float, oy: float,
 				break
 	var n := WARP_SEG if warped else 1
 	var pts := []
-	for gy in n + 1:
-		for gx in n + 1:
-			pts.append(_chain_point(ctx.segs,
-					Vector2(w * gx / n - ox, h * gy / n - oy)))
+	if fast:
+		# Composed-affine plan: identical results up to float
+		# associativity, far fewer matrix applications per point.
+		var plan := chain_plan(ctx.segs)
+		for gy in n + 1:
+			for gx in n + 1:
+				pts.append(chain_point_fast(plan,
+						Vector2(w * gx / n - ox, h * gy / n - oy)))
+	else:
+		for gy in n + 1:
+			for gx in n + 1:
+				pts.append(_chain_point(ctx.segs,
+						Vector2(w * gx / n - ox, h * gy / n - oy)))
 	return [pts, n]
 
 

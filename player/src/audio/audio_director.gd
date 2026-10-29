@@ -22,14 +22,22 @@ var _voice_bus := -1
 var _bgm_req := 0
 var _bgm_want := -1  # track the script most recently asked for
 var _voice_req := 0
-var _bgv_req := 0
 var _se_pool: Array[AudioStreamPlayer] = []
 var _se_rr := 0
 var _se_gain := 0.8
+## BGV (op 0x88) is a MULTI-CHANNEL looping ambience system: the
+## original addresses channels 1/2 (environment beds, e.g. the fire
+## crackle) and 6/9/10/11/12 (background-voice layers) independently,
+## and op 0x89 stops one channel by number. The old single-player
+## design made every new loop replace the previous one and gave 0x89
+## nowhere to land, so a bed that the script had stopped kept looping
+## for the rest of the session.
+var _bgv: Dictionary = {}  # channel -> AudioStreamPlayer
+var _bgv_req: Dictionary = {}  # channel -> supersede token
+var _bgv_gain := 0.7
 
 @onready var _bgm: AudioStreamPlayer = $BGM
 @onready var _voice: AudioStreamPlayer = $Voice
-@onready var _bgv: AudioStreamPlayer = $BGV
 
 
 func setup(p_pkg: GamePackage) -> void:
@@ -46,7 +54,6 @@ func setup(p_pkg: GamePackage) -> void:
 		# constants are not exposed to GDScript in 4.7).
 		_bgm.playback_type = 1
 		_voice.playback_type = 1
-		_bgv.playback_type = 1
 	DirAccess.make_dir_recursive_absolute("user://audio_cache")
 	# Route voice to its own bus so the stage can read its peak level
 	# for lip sync without the BGM polluting the measurement.
@@ -57,7 +64,6 @@ func setup(p_pkg: GamePackage) -> void:
 		AudioServer.set_bus_name(_voice_bus, "Voice")
 		AudioServer.set_bus_send(_voice_bus, "Master")
 	_voice.bus = "Voice"
-	_bgv.bus = "Voice"
 	# One-shot SE players (op 0x8B): a small pool, because the script
 	# can fire two SE at the same beat (slots 1+2) and a shot must
 	# never cut the BGV loop, the dialogue voice, or another shot.
@@ -82,7 +88,9 @@ func set_voice_gain(f: float) -> void:
 
 
 func set_bgv_gain(f: float) -> void:
-	_bgv.volume_db = linear_to_db(maxf(f, 0.0001))
+	_bgv_gain = f
+	for ch in _bgv:
+		(_bgv[ch] as AudioStreamPlayer).volume_db = linear_to_db(maxf(f, 0.0001))
 
 
 func set_se_gain(f: float) -> void:
@@ -194,34 +202,63 @@ func stop_voice() -> void:
 	_voice.stop()
 
 
-func play_bgv(voice_name: String) -> void:
-	_bgv_req += 1
-	var token := _bgv_req
+## One BGV channel (op 0x88): looping ambience addressed by channel
+## number. Channels are created on first use and live for the whole
+## session (a scene may start and stop the same channel many times).
+func _bgv_player(channel: int) -> AudioStreamPlayer:
+	if _bgv.has(channel):
+		return _bgv[channel]
+	var p := AudioStreamPlayer.new()
+	p.name = "BGV%d" % channel
+	if OS.has_feature("web"):
+		p.playback_type = 1
+	p.bus = "Voice"
+	p.volume_db = linear_to_db(maxf(_bgv_gain, 0.0001))
+	add_child(p)
+	_bgv[channel] = p
+	_bgv_req[channel] = 0
+	return p
+
+
+func play_bgv(channel: int, voice_name: String) -> void:
+	var p := _bgv_player(channel)
+	_bgv_req[channel] = int(_bgv_req[channel]) + 1
+	var token := int(_bgv_req[channel])
 	var bytes := pkg.voice_bytes(voice_name)
 	if pkg.is_web() and bytes.is_empty():
 		await pkg.ensure_voice(voice_name)
-		if token != _bgv_req:
+		if token != int(_bgv_req[channel]):
 			return
 		bytes = pkg.voice_bytes(voice_name)
 		if bytes.is_empty():
 			await get_tree().create_timer(0.8).timeout
-			if token != _bgv_req:
+			if token != int(_bgv_req[channel]):
 				return
 			await pkg.ensure_voice(voice_name)
-			if token != _bgv_req:
+			if token != int(_bgv_req[channel]):
 				return
 			bytes = pkg.voice_bytes(voice_name)
 	if bytes.is_empty():
 		return
 	# Ambience loops until the script stops it (fire crackle etc.);
 	# a non-looping stream played the loop once and went silent.
-	_bgv.stream = _stream(bytes, "v_" + voice_name, true)
-	_bgv.play()
+	p.stream = _stream(bytes, "v_" + voice_name, true)
+	p.play()
 
 
-func stop_bgv() -> void:
-	_bgv_req += 1
-	_bgv.stop()
+## op 0x89: stop one BGV channel. Channels that were never started are
+## ignored (the script stops beds defensively on scene entry).
+func stop_bgv(channel: int) -> void:
+	if not _bgv.has(channel):
+		return
+	_bgv_req[channel] = int(_bgv_req[channel]) + 1
+	(_bgv[channel] as AudioStreamPlayer).stop()
+
+
+func stop_all_bgv() -> void:
+	for ch in _bgv:
+		_bgv_req[ch] = int(_bgv_req[ch]) + 1
+		(_bgv[ch] as AudioStreamPlayer).stop()
 
 
 ## One-shot sound effects (op 0x8B): short wave-pack clips played
@@ -251,7 +288,22 @@ func stop_se() -> void:
 
 
 func any_voice_playing() -> bool:
-	return _voice.playing or _bgv.playing
+	if _voice.playing:
+		return true
+	for ch in _bgv:
+		if (_bgv[ch] as AudioStreamPlayer).playing:
+			return true
+	return false
+
+
+## Diagnostic: BGV channels currently audible.
+func bgv_channels_playing() -> Array:
+	var out := []
+	for ch in _bgv:
+		if (_bgv[ch] as AudioStreamPlayer).playing:
+			out.append(ch)
+	out.sort()
+	return out
 
 
 ## Line voice only (BGV ambience loops forever and must not block
@@ -276,6 +328,7 @@ func debug_state() -> Dictionary:
 						_voice_bus, 0), -120.0) if _voice_bus >= 0 else -120.0,
 		"master_vol_db": snappedf(AudioServer.get_bus_volume_db(0), 0.1),
 		"bgm_vol_db": snappedf(_bgm.volume_db, 0.1),
+		"bgv_channels": bgv_channels_playing(),
 		"mix_rate": AudioServer.get_mix_rate(),
 	}
 

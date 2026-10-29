@@ -9,7 +9,8 @@ func _canon_effect(e: Dictionary) -> String:
 		"movie": return "fx|movie|%s" % e["name"]
 		"bgm_play": return "fx|bgm_play|%d" % e["track"]
 		"bgm_stop": return "fx|bgm_stop"
-		"voice_play": return "fx|voice_play|%s" % e["name"]
+		"bgv_play": return "fx|bgv_play|%d|%s" % [e["ch"], e["name"]]
+		"bgv_stop": return "fx|bgv_stop|%d" % e["ch"]
 		"emote_load": return "fx|emote_load|%d|%s" % [e["slot"], e["name"]]
 		"emote_unload": return "fx|emote_unload|%d" % e["slot"]
 		"emote_load_hc": return "fx|emote_load_hc|%d|%s" % [e["slot"], e["name"]]

@@ -18,7 +18,5 @@ script = ExtResource("3")
 
 [node name="Voice" type="AudioStreamPlayer" parent="AudioDirector"]
 
-[node name="BGV" type="AudioStreamPlayer" parent="AudioDirector"]
-
 [node name="DialogueUI" type="CanvasLayer" parent="."]
 script = ExtResource("4")
