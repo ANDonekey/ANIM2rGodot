@@ -529,11 +529,13 @@ func _render_slot(slot: int, fade_seconds: float, rvars: Dictionary, offsets: Di
 			continue
 		node.z_index = order
 		order += 1
+		_apply_blend(node, int(item["p"]["bm"]))
 		new_root.add_child(node)
 		nodes[item["key"]] = node
 		metas[item["key"]] = {"tex": item["p"]["tex"],
 				"rect": item["p"]["rect"], "grid_n": item["p"]["grid_n"],
-				"ox": item["p"]["ox"], "oy": item["p"]["oy"]}
+				"ox": item["p"]["ox"], "oy": item["p"]["oy"],
+				"bm": int(item["p"]["bm"])}
 	st["parts_root"] = new_root
 	st["parts"] = parts
 	st["sig"] = _signature(rvars, offsets)
@@ -559,6 +561,12 @@ func _render_slot(slot: int, fade_seconds: float, rvars: Dictionary, offsets: Di
 ## unless the part's static texture/rect/grid changed.
 func _update_part_node(st: Dictionary, node: CanvasItem, p: Dictionary, kind: int, cache: Dictionary, key: String) -> void:
 	var meta: Dictionary = cache["meta"][key]
+	# The blend mode follows the expression (blush/shadow layers come and
+	# go), so it is tracked separately from the static geometry.
+	var bm := int(p.get("bm", 0)) & 0xF
+	if int(meta.get("bm", -1)) != bm:
+		_apply_blend(node, bm)
+		meta["bm"] = bm
 	var static_changed: bool = meta.get("tex") != p["tex"] \
 			or meta.get("rect") != p["rect"] \
 			or int(meta.get("grid_n", -1)) != int(p["grid_n"]) \
@@ -619,6 +627,70 @@ func _part_node(st: Dictionary, p: Dictionary, kind: int) -> CanvasItem:
 	if kind == 1:
 		return _warp_polygon(st, p, null)
 	return _plain_sprite(st, p)
+
+
+# ---- blend modes (bm) ----
+## The original indexes a 6-entry table of (BLENDOP, SRCBLEND, DESTBLEND)
+## triples with (bm & 0xF) and applies it per part (docs/emote-driver.md §3):
+##
+##   bm 0  ADD / SRCALPHA / INVSRCALPHA    standard alpha    -> mix
+##   bm 1  ADD / SRCALPHA / ONE            additive          -> add
+##   bm 2  REVSUB / SRCALPHA / ONE         reverse subtract  -> sub
+##   bm 3  ADD / DESTCOLOR / INVSRCALPHA   multiply          -> shader(*)
+##   bm 4  ADD / INVDESTCOLOR / ONE        screen            -> add   (*)
+##   bm 5  REVSUB / SRCALPHA / ONE         same triple as 2  -> sub
+##
+## Canvas blending only exposes mix/add/sub/mul, so two modes need care:
+##   (*) bm=3 gets a dedicated shader (multiply_blend.gdshader): built-in
+##       MUL is (DST_COLOR, ZERO), which drops the dst*(1-srcA) term and
+##       turned the black alpha-shaped eye/mouth shadow layers into solid
+##       rectangles (caught by the shot_bm3 A/B, 2026-10-30). The shader
+##       feeds blend_mul the combined multiplier src.rgb + (1 - srcA) and
+##       reproduces the triple exactly.
+##   (*) bm=4 (2 parts in the whole script) has no canvas equivalent;
+##       additive is the closest glow-like approximation.
+## bm 1 (add) and 2/5 (reverse subtract) map 1:1 onto canvas add/sub.
+var _blend_mats: Dictionary = {}
+var _mult_mat: ShaderMaterial
+
+const MULT_BLEND_SHADER := preload("res://src/stage/multiply_blend.gdshader")
+
+
+func _blend_mode_for(bm: int) -> int:
+	match bm & 0xF:
+		1, 4:
+			return CanvasItemMaterial.BLEND_MODE_ADD
+		2, 5:
+			return CanvasItemMaterial.BLEND_MODE_SUB
+	return CanvasItemMaterial.BLEND_MODE_MIX
+
+
+## Shared material per mode — never per part: one Resource keeps the ~55
+## parts batchable and the fast path allocation-free.
+func _blend_material(bm: int) -> Material:
+	var key := bm & 0xF
+	var hit: Variant = _blend_mats.get(key)
+	if hit != null:
+		return hit
+	var mat: Material
+	if key == 3:
+		if _mult_mat == null:
+			_mult_mat = ShaderMaterial.new()
+			_mult_mat.shader = MULT_BLEND_SHADER
+		mat = _mult_mat
+	else:
+		var cm := CanvasItemMaterial.new()
+		cm.blend_mode = _blend_mode_for(key)
+		mat = cm
+	_blend_mats[key] = mat
+	return mat
+
+
+func _apply_blend(node: CanvasItem, bm: int) -> void:
+	var key := bm & 0xF
+	# bm=0 is the default blend, so ordinary parts carry no material at
+	# all and keep the cheapest possible draw.
+	node.material = null if key == 0 else _blend_material(key)
 
 
 func _plain_sprite(st: Dictionary, p: Dictionary) -> Sprite2D:
