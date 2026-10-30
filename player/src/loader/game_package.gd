@@ -149,6 +149,11 @@ func bgm_count() -> int:
 	return _bgm.size()
 
 
+## True when the package carries bgm/<track>.eog.
+func has_bgm(track: int) -> bool:
+	return _bgm.has(track)
+
+
 func movie_count() -> int:
 	return _movies.size()
 

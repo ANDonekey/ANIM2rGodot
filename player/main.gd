@@ -350,9 +350,20 @@ func _new_vm(request: int) -> void:
 	_session_live = true
 
 
+## The title screen plays bgm/09.eog directly from the exe (not from the
+## script): Wine file tracing on the original opened it twice while the
+## menu sat idle, and the script's 0x82 only ever uses tracks 1-10
+## (docs/sce-format.md, 2026-10-30). Track 9 was previously unused by
+## the player, which left the title silent.
+const TITLE_BGM := 9
+
+
 func _show_title() -> void:
 	gallery.hide_all()
 	title.show_title(pkg)
+	if pkg != null and pkg.has_bgm(TITLE_BGM):
+		audio.set_bgm_loop(true)
+		audio.play_bgm(TITLE_BGM)
 	if _shots_dir != "" and not _shot_beats.has("title"):
 		_shot_beats["title"] = true
 		_take_shot("shot_title.png")
