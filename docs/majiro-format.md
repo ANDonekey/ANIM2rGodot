@@ -347,7 +347,7 @@ entry 结构（16 字节）：
 槽位命名：<0 或 10001 → majiro_last.sav；<10000 → majiro_%04d.sav；
 否则 majiro_quick%d.sav（号取 QuickNum 配置）。get_save_info$
 （FUN_004288f0→FUN_00428a50）只读头 16 B 校验版本串再读 0x80 B 标题。
-majiro_system.mss（MajiroSysV1.100）结构待按同一透镜续解。
+majiro_system.mss（MajiroSysV1.100）结构见 §17；读取语义补遗见 §19。
 
 ### 16.1 .sav 细部（真实文件解析，2026-10-29）
 
@@ -389,3 +389,10 @@ majiro_system.mss：头后 u32 859 / 18369，正文以 0 字节占绝大多数
 
 - **updateCHS 的 .rct 牌图是近原始字面流，解码器必须输入有界**：config_off / config_on / config_on1 三牌（各 2,359,347 B，补丁包版本）解码实测为 12 段 65,535 px 字面块 + 尾块，整流输出比 1024×768×3 少 2 px（57 B），流恰好在 EOF 耗尽。按「输出未满继续读」的解码器必读越界一命令（本播放器与 Python oracle 解码器都曾在此崩/越界）；日版原牌则 consumed 与 datasize 精确吻合。结论：Majiro 的 .rct 解码须以**输入耗尽即停**为终止条件之一，尾部短缺以未写区域留底色处理——原生引擎对此类牌图同样是容忍的（原版+补丁包可正常运行）。
 - **标识符哈希双轨**（与 §1 呼应）：文件名 = 错误实现版 CRC-64；脚本内函数/变量名 = 标准 CRC-32。运行时 get_variable/set_variable 的名字参数在 VM 内现算 CRC-32 查表（2026-11-06 实测：`#musicvol@CONFIG` = 0x5731EA89、`$init@GLOBAL` = 0xB1BB8ADC、`$main@GLOBAL` = 0x1D128F30）。
+
+## 19. 存档读取语义（exe 钉死 + 实装，2026-11-06）
+
+- **get_save_time$（FUN_00428d60 包装 → FUN_00428b30）**：先同样校验 .sav 头 16 B 版本串，不符/文件缺失返回空串；否则取**文件最后修改时间、转本地时区**，格式 `"%02d/%02d/%02d %02d:%02d:%02d"`（年、月、日、时、分、秒）。
+- **system.mss 在引擎启动期恢复**（非脚本驱动：load_sysdata.mjil 的 syscall 集里没有读 .mss 的动作）：PERSISTENT 单元表按 §17 结构 + §16.2 blob 对象编码恢复。播放器实装与原生对齐：boot 前载入 `<game_dir>/savedata/majiro_system.mss`。真实通关档实测 860 个单元（int 767 / string 73 / 数值数组 17 / 字符串数组 3），长度公式 0x9C58 + 860×16 + blob 18,369 = 72,153 B 精确吻合；数组对象维度存为 (1, 1, N)，读入时塌缩前导 1 维。
+- **标题 Extra 门**（start.mjil 0x16a7–0x1954）：persistent int **$c88dfb04** 非零时菜单牌用「タイトルメニュー_off」（含 omake）并注册第 5 项 buttonmenu（id=4）；为零时用「タイトルメニュー_off_wo_omake」且不注册。同一持久值还先经 set_effectspeed($89390437) 设定转场速度。
+- **.sav 长度公式**对真实档四件全精确：0xA3E0 + 缩略图 w×h×3 + 线程数×0xA8 + 三表条数×16 + blob 大小；真实档缩略图均为 1×1 占位。

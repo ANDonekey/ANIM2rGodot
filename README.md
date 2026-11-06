@@ -24,7 +24,7 @@ Exit）全部端到端验证（截图实证）；正文在窗内以原版配色�
 bsel.5 帧析构、timer_sync、areaevent 回调、sprite_paste 真签名、
 引擎内置 CONSOLE_* 事件、fontout 家族、FRONT 合成帧语义、
 sprite_push 搁置语义、pic_unpack 贴印分流均已实测钉死。
-残留：存档后端未实装（Load 屏为空槽状态）、转场效果码未全、
+残留：存档写入/do_load 未实装（读取已实装：系统档恢复 + 槽位信息/时间）、转场 DO_TOP 活体未验、画廊内部呈现未落定、
 菜单超时 attract 未验、movie_*（规格外）。
 
 | 模块 | 状态 |
@@ -36,12 +36,12 @@ sprite_push 搁置语义、pic_unpack 贴印分流均已实测钉死。
 | syscall 宿主层（MajiroHost） | 派发器全表已提取：456 个处理器 + 27 内联（`docs/majiro-syscalls.json`），语料 289 个名哈希全覆盖；文件族（CP932 文本逐字段扫描：逗号/换行定界、字段内空格保留）、dim_create、字符串/数学工具族、get_variable/set_variable（名哈希 = 明文 CRC-32）均为真实实现 |
 | 文本层 | CP932 / GBK 编解码表（gzip+b64 存仓，生成器 `generate_tables.py`）；汉化字形替换 codec「chs」（CP932 对 → CHS.TBL → GBK 码）已钉死并与离线 oracle 逐条对齐（155 条真中文） |
 | .rct / .rc8 图像 | 解码规格钉死：20 B 头 + LZ77 指令流；rct = 24bpp BGR、rc8 = 8bpp 调色板；TC01 带底图名、纯红透明递归合成；绝大多数 `.rc8` 是同名 `.rct` 的 alpha 掩码（`_.rc8` 规则）；GDScript 解码与 Python 参考实现 md5 对账 24 张全同；汉化补丁的三张牌图为近原始字面流（整流短 2 px），解码器已改输入有界容忍 |
-| 存档格式 | `.sav` / `system.mss` / `readmark.mss` 全解：头部块、缩略图、线程记录、三作用域变量表与变长 blob 均已建模，两份样本计算总长与文件精确一致；**运行时读写后端未实装**：get_save_info$ 返回空串、save 系为记账 no-op |
+| 存档格式 | `.sav` / `system.mss` / `readmark.mss` 全解：头部块、缩略图、线程记录、三作用域变量表与变长 blob 均已建模，真实通关档（860 单元 / 4 槽 / 227 既読条）计算总长与文件精确一致；**运行时读取已实装**：boot 前恢复 system.mss 持久作用域（Extra 解锁门据此生效）、get_save_info$ / get_save_time$ 读真实槽位文件；写入与 do_load 状态恢复未实装，save 系记账为 no-op |
 | 表现层（图形/文本/声音） | 已实现（`majiro_stage/console/audio.gd` + `majiro_player` 入口场景）：Page 池与 alfa 伴生页、Sprite 链表层序与 push/pop 搁置、grp 像素操作（字节缓存）、FRONT 合成帧取景、fontout 记录文本、转场呈现、areaevent 输入、Console 文本烘焙（固定明朝系字体、阴影 alpha 配色模型）与点击门、SE/语音/BGM 声道池。开机→厂标→标题→四子屏/正文全程主机实测通过；细节与残留见规格 §12 |
 
 ## 文档
 
-- `docs/majiro-format.md` —— 容器/脚本/图像/存档格式与 exe 行为规格（§§1–18）
+- `docs/majiro-format.md` —— 容器/脚本/图像/存档格式与 exe 行为规格（§§1–19）
 - `docs/majiro-presentation-design.md` —— 表现层设计规格（宿主架构、Godot 映射、五期计划）
 - `docs/majiro-syscalls.json` —— syscall 派发表（哈希 → 处理器地址 + 内联名单）
 

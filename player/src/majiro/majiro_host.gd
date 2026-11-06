@@ -65,17 +65,85 @@ static func _as_bytes(v: Dictionary) -> PackedByteArray:
 	return PackedByteArray()
 
 
+var game_dir := ""
+
+
+func _save_path(slot: int) -> String:
+	if game_dir == "":
+		return ""
+	var fname: String
+	if slot < 0 or slot == 10001:
+		fname = "majiro_last.sav"
+	elif slot < 10000:
+		fname = "majiro_%04d.sav" % slot
+	else:
+		fname = "majiro_quick%d.sav" % slot
+	return game_dir + "/savedata/" + fname
+
+
+func _get_save_time(a: Array) -> Dictionary:
+	# get_save_time$(slot) (exe FUN_00428b30): verify the
+	# 16-byte version string, then answer the save file's
+	# last-write time in local time, formatted
+	# "%02d/%02d/%02d %02d:%02d:%02d" (year, month, day, hour,
+	# minute, second). Missing/invalid -> "" like the native.
+	if a.is_empty():
+		return vstr(PackedByteArray())
+	var path := _save_path(_as_int(a[0]))
+	if path == "" or not FileAccess.file_exists(path):
+		return vstr(PackedByteArray())
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return vstr(PackedByteArray())
+	var head := f.get_buffer(16)
+	if head.size() < 16 or head.slice(0, 15).get_string_from_ascii() != "MajiroSavV1.103":
+		return vstr(PackedByteArray())
+	var unix := FileAccess.get_modified_time(path)
+	if unix <= 0:
+		return vstr(PackedByteArray())
+	var tz := Time.get_time_zone_from_system()
+	var local := unix + int(tz["bias"]) * 60
+	var dt := Time.get_datetime_dict_from_unix_time(local)
+	var s := "%02d/%02d/%02d %02d:%02d:%02d" % [
+		int(dt["year"]), int(dt["month"]), int(dt["day"]),
+		int(dt["hour"]), int(dt["minute"]), int(dt["second"])]
+	return vstr(s.to_ascii_buffer())
+
+
+func _get_save_info(a: Array) -> Dictionary:
+	# get_save_info$(slot) (exe FUN_004288f0 -> FUN_00428a50):
+	# check the 16-byte version string, then return the 0x80-byte
+	# title at +0x10 (up to its NUL). Missing/invalid -> "".
+	if a.is_empty():
+		return vstr(PackedByteArray())
+	var path := _save_path(_as_int(a[0]))
+	if path == "" or not FileAccess.file_exists(path):
+		return vstr(PackedByteArray())
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return vstr(PackedByteArray())
+	var head := f.get_buffer(0x90)
+	if head.size() < 0x90 or head.slice(0, 15).get_string_from_ascii() != "MajiroSavV1.103":
+		return vstr(PackedByteArray())
+	var title := head.slice(0x10, 0x90)
+	var z := title.find(0)
+	if z >= 0:
+		title = title.slice(0, z)
+	return vstr(title)
+
+
 func attach(vm: MajiroVm) -> void:
 	var s := vm.syscalls
 	# --- file family (Majiro text-format scanner) ---
 	s[0xE4E3B40D] = _file_open        # file_open
 	s[0xD6333B3C] = _file_close       # file_close
 	s[0x2539D212] = _file_read        # file_read   -> int
-	# Save-slot metadata: no save backend yet, so every slot
-	# reads as empty (the native answer for a slot with no save
-	# file) instead of an int 0 the scripts misread as a string.
-	s[0x65075141] = func(_a: Array) -> Dictionary: return vstr(PackedByteArray())  # get_save_info$
-	s[0xA549E852] = func(_a: Array) -> Dictionary: return vstr(PackedByteArray())  # get_save_time$
+	# Save-slot metadata reads the real save files under
+	# <game_dir>/savedata (headers only; full state restore is
+	# the engine's do_load, not these display syscalls). A slot
+	# with no valid file answers "" exactly like the native one.
+	s[0x65075141] = _get_save_info    # get_save_info$
+	s[0xA549E852] = _get_save_time    # get_save_time$
 	s[0x9A1ACECA] = func(_a: Array) -> Dictionary: return vint(0)  # reg_write (no-op)
 	s[0x55232561] = _file_read_str    # file_read$  -> string token
 	s[0x6008BEBB] = _file_read_line   # file_read_line$

@@ -295,6 +295,115 @@ const HASH_INIT_GLOBAL := 0xB1BB8ADC # hash32("$init@GLOBAL")
 const HASH_MAIN_GLOBAL := 0x1D128F30 # hash32("$main@GLOBAL")
 
 
+## Restore the PERSISTENT scope from a majiro_system.mss image
+## (format doc section 17; the engine reads it at startup, before
+## any script runs -- this is what carries unlock state such as
+## the title screen's Extra/omake flag $c88dfb04). Scalars land
+## in _persist_synth, arrays in _persist as cell arrays, using
+## the blob object encodings of section 16.2. Returns false on a
+## bad image (the caller then boots with fresh persistents).
+func load_persistents(data: PackedByteArray) -> bool:
+	if data.size() < 0x9C58 + 24:
+		return false
+	if data.slice(0, 15).get_string_from_ascii() != "MajiroSysV1.100":
+		return false
+	var cnt := int(data.decode_u32(0x10))
+	var blob_size := int(data.decode_u32(0x14))
+	var blob_base := 0x9C58 + cnt * 16
+	if cnt < 0 or blob_base + blob_size > data.size():
+		return false
+	var blob := data.slice(blob_base, blob_base + blob_size)
+	for i in range(cnt):
+		var o := 0x9C58 + i * 16
+		var hash := int(data.decode_u32(o))
+		var kind := int(data.decode_u32(o + 4))
+		var d8 := int(data.decode_u32(o + 8))
+		var dc := int(data.decode_u32(o + 12))
+		match kind:
+			0:
+				_persist_synth[hash] = vint(i32(dc))
+			1:
+				var fb := PackedByteArray()
+				fb.resize(4)
+				fb.encode_u32(0, dc)
+				_persist_synth[hash] = vfloat(fb.decode_float(0))
+			2:
+				_persist_synth[hash] = vstr(_mss_string(blob, d8))
+			3, 4:
+				_persist[hash] = _mss_num_array(blob, d8, kind)
+			5:
+				_persist[hash] = _mss_str_array(blob, d8)
+	return true
+
+
+func _mss_string(blob: PackedByteArray, off: int) -> PackedByteArray:
+	if off < 0 or off + 12 > blob.size():
+		return PackedByteArray()
+	var ln := int(blob.decode_u32(off + 8))
+	if ln < 0 or off + 12 + ln > blob.size():
+		return PackedByteArray()
+	return blob.slice(off + 12, off + 12 + ln)
+
+
+func _mss_dims(blob: PackedByteArray, off: int) -> Array:
+	# Array object header is 0x18 bytes; extents live at
+	# +8/+0xC/+0x10 and 1-extents at the front collapse away
+	# (the engine stores 1-D arrays as (1, 1, N)).
+	var ext := [int(blob.decode_u32(off + 8)), int(blob.decode_u32(off + 12)),
+			int(blob.decode_u32(off + 16))]
+	while ext.size() > 1 and int(ext[0]) == 1:
+		ext.pop_front()
+	return ext
+
+
+func _mss_nest(flat: Array, ext: Array, kind: int) -> Array:
+	if ext.size() <= 1:
+		return flat
+	var n := int(ext[0])
+	var rest: Array = ext.slice(1)
+	var chunk := maxi(1, flat.size() / n)
+	var out: Array = []
+	for i in range(n):
+		out.append({"k": kind, "v": _mss_nest(flat.slice(i * chunk, (i + 1) * chunk), rest, kind)})
+	return out
+
+
+func _mss_num_array(blob: PackedByteArray, off: int, kind: int) -> Array:
+	if off < 0 or off + 24 > blob.size():
+		return []
+	var ext := _mss_dims(blob, off)
+	var total := 1
+	for e in ext:
+		total *= int(e)
+	var flat: Array = []
+	for i in range(total):
+		var eo := off + 24 + i * 4
+		if eo + 4 > blob.size():
+			break
+		if kind == 4:
+			flat.append(vfloat(blob.decode_float(eo)))
+		else:
+			flat.append(vint(i32(int(blob.decode_u32(eo)))))
+	return _mss_nest(flat, ext, kind)
+
+
+func _mss_str_array(blob: PackedByteArray, off: int) -> Array:
+	if off < 0 or off + 24 > blob.size():
+		return []
+	var ext := _mss_dims(blob, off)
+	var total := 1
+	for e in ext:
+		total *= int(e)
+	var flat: Array = []
+	for i in range(total):
+		var oo := off + 24 + i * 4
+		if oo + 4 > blob.size():
+			break
+		var so := int(blob.decode_s32(oo))
+		flat.append(vstr(_mss_string(blob, so) if so >= 0 else PackedByteArray()))
+	return _mss_nest(flat, ext, K_SARR)
+
+
 func boot(script_name: String) -> bool:
 	var rec: Variant = load_script(script_name)
 	if rec == null:

@@ -43,6 +43,7 @@ func _ready() -> void:
 			text_codec = "chs"
 	vm = MajiroVm.new(Callable(vfs, "load_script"))
 	host = MajiroHost.new()
+	host.game_dir = game_dir
 	host.read_file = Callable(vfs, "read_file")
 	host.attach(vm)
 	_subviewport = SubViewport.new()
@@ -73,6 +74,11 @@ func _ready() -> void:
 	audio.bind(vm, vfs)
 	audio.attach()
 	stage._audio = audio
+	var sys_path := game_dir + "/savedata/majiro_system.mss"
+	if FileAccess.file_exists(sys_path):
+		var sf := FileAccess.open(sys_path, FileAccess.READ)
+		if sf != null and vm.load_persistents(sf.get_buffer(sf.get_length())):
+			print("majiro_player: system data loaded (persistent state restored)")
 	if not vm.boot("start"):
 		push_error("boot failed")
 		get_tree().quit(1)

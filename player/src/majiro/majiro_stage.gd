@@ -124,6 +124,23 @@ func _wake(t: Dictionary) -> void:
 	t["wait"] = 0
 
 
+func _thread_by_tid(tid: int) -> Variant:
+	for t in vm._threads:
+		if int(t.get("tid", -1)) == tid:
+			return t
+	return null
+
+
+## True when every thread in the caller's join set has finished
+## (do_event_single: the transition workers ran to completion).
+func _join_finished(t: Dictionary) -> bool:
+	for tid in t["join_tids"]:
+		var wt: Variant = _thread_by_tid(int(tid))
+		if wt != null and not bool((wt as Dictionary).get("done", false)):
+			return false
+	return true
+
+
 var _trans_rect: TextureRect = null
 var _trans_page := 0
 var _trans_start := 0
@@ -214,6 +231,24 @@ func _tick_waits() -> void:
 	for t in vm._threads:
 		if int(t.get("wait", 0)) == 0:
 			continue
+		if t.has("join_tids"):
+			if _join_finished(t):
+				t.erase("join_tids")
+				t["join_done"] = true
+				_wake(t)
+				continue
+			if click_bits != 0:
+				# Click-skip: kill the joined workers (their bsel.5
+				# destructors run), then fall through to the generic
+				# click-skip below, which moves the caller itself to
+				# its armed destructor.
+				for tid in t["join_tids"]:
+					var wt: Variant = _thread_by_tid(int(tid))
+					if wt != null and not bool((wt as Dictionary).get("done", false)):
+						vm._kill_thread(wt)
+				t.erase("join_tids")
+			else:
+				continue
 		if click_bits != 0 and not t.has("stage_trans_until"):
 			# Click-skip: abandon the suspended syscall and run the
 			# top frame's bsel.5 destructor (the engine's skip path
@@ -873,6 +908,7 @@ func attach() -> void:
 	s[0xD01BE374] = _sc_grp_boxfill          # grp_boxfill
 	s[0xFDDF6C40] = _sc_grp_extboxfill       # grp_extboxfill
 	s[0x61BAE53C] = _sc_grp_mulboxfill       # grp_mulboxfill
+	s[0x3CAD3884] = _sc_make_alfa_table      # make_alfa_table       # grp_mulboxfill
 	s[0x4C310B4B] = _sc_grp_point_get        # grp_point_get
 	s[0x7E277952] = _sc_grp_point_set        # grp_point_set
 	for h in [0x171AEE22, 0x053FAC99, 0xFD128A61, 0xDA675785, 0xAC796720,
@@ -1037,10 +1073,15 @@ func _sc_grp_copy(a: Array) -> Dictionary:
 	var dst: Variant = _page(_ai(a[5]))
 	if src == null or dst == null:
 		return MajiroVm.vint(0)
+	# Short form (6 args): the destination offset defaults to
+	# the source offset -- the omake screen's wipe loop in
+	# start.mjil sweeps grp_copy strips with only
+	# (src, sx, sy, w, h, dst) and relies on each strip
+	# landing at its own sx (same for grp_extcopy below).
 	if int(src["format"]) == 0 and int(dst["format"]) == 1:
 		return MajiroVm.vint(0)  # 24bpp -> 8bpp is an engine error: skip
-	var dx := _ai(a[6]) if a.size() >= 7 else 0
-	var dy := _ai(a[7]) if a.size() >= 8 else 0
+	var dx := _ai(a[6]) if a.size() >= 7 else _ai(a[1])
+	var dy := _ai(a[7]) if a.size() >= 8 else _ai(a[2])
 	_blit_pair(src, dst, _ai(a[1]), _ai(a[2]), _ai(a[3]), _ai(a[4]), dx, dy)
 	return MajiroVm.vint(0)
 
@@ -1063,8 +1104,8 @@ func _sc_grp_extcopy(a: Array) -> Dictionary:
 	var dst: Variant = _page(_ai(a[5]))
 	if src == null or dst == null:
 		return MajiroVm.vint(0)
-	var dx := _ai(a[6]) if a.size() >= 7 else 0
-	var dy := _ai(a[7]) if a.size() >= 8 else 0
+	var dx := _ai(a[6]) if a.size() >= 7 else _ai(a[1])
+	var dy := _ai(a[7]) if a.size() >= 8 else _ai(a[2])
 	var fade := _ai(a[8]) if a.size() >= 9 else 0
 	_extcopy_pair(src, dst, _ai(a[1]), _ai(a[2]), _ai(a[3]), _ai(a[4]), dx, dy, fade)
 	return MajiroVm.vint(0)
@@ -1110,6 +1151,60 @@ func _sc_grp_mulboxfill(a: Array) -> Dictionary:
 	rec["px_dirty"] = true
 	rec["dirty"] = true
 	return MajiroVm.vint(0)
+
+
+func _sc_make_alfa_table(a: Array) -> Dictionary:
+	# make_alfa_table(alfa_src, alfa_dst, intarray[256]) (exe
+	# FUN_00423520 + FUN_00459f60): build a 256-entry lookup from
+	# the array (each value clamped to 0..255) and remap the dst
+	# page's index bytes through it, indexed by the src page's
+	# index bytes: dst[i] = table[src[i]], over the intersection
+	# of the two pages. Both pages must be 8bpp (format != 0);
+	# every validation failure is a silent no-op in the engine.
+	# Index bytes live in the R channel of the stored RGBA image.
+	if a.size() < 3:
+		return MajiroVm.vint(0)
+	var ra: Variant = _page(_ai(a[0]))
+	var rb: Variant = _page(_ai(a[1]))
+	if ra == null or rb == null:
+		return MajiroVm.vint(0)
+	if int(ra["format"]) == 0 or int(rb["format"]) == 0:
+		return MajiroVm.vint(0)
+	if int(a[2].get("k", -1)) != MajiroVm.K_IARR:
+		return MajiroVm.vint(0)
+	var flat: Array = []
+	_flat_ints(a[2]["v"], flat)
+	if flat.size() < 256:
+		return MajiroVm.vint(0)
+	var table := PackedByteArray()
+	table.resize(256)
+	for i in range(256):
+		table[i] = clampi(int(flat[i]), 0, 255)
+	var adata := _px(ra)
+	var bdata := _px(rb)
+	var wa: int = ra["img"].get_width()
+	var wb: int = rb["img"].get_width()
+	var w := mini(wa, wb)
+	var h := mini(ra["img"].get_height(), rb["img"].get_height())
+	for yy in range(h):
+		var oa := yy * wa * 4
+		var ob := yy * wb * 4
+		for xx in range(w):
+			bdata[ob] = table[adata[oa]]
+			oa += 4
+			ob += 4
+	rb["px"] = bdata
+	rb["px_dirty"] = true
+	rb["dirty"] = true
+	return MajiroVm.vint(0)
+
+
+func _flat_ints(v: Variant, out: Array) -> void:
+	if v is Array:
+		for e in v:
+			_flat_ints(e, out)
+	elif v is Dictionary:
+		out.append(_ai(v))
 
 
 func _sc_grp_extboxfill(a: Array) -> Dictionary:
@@ -1731,43 +1826,42 @@ const TRANSITION_MS := 800
 ## OR on a click-skip it resumes the thread at its armed bsel.5 target
 ## (the pic/transit cleanup path) instead of returning.
 func _sc_do_event_single(a: Array) -> Dictionary:
-	# Engine arg order for the pic worker's call: (-1, name$, ...,
-	# page, effect). Locate the pieces by value instead of position:
-	# the event name is the string argument; the transition page is
-	# the int argument that names a live page; the duration is a
-	# plausible millisecond int among the rest.
-	var name := ""
-	var pg := -1
-	var dur := TRANSITION_MS
-	var strs: Array = []
-	for v in a:
-		if int(v["k"]) == K_STRING:
-			strs.append(MajiroText.decode_cp932(_ab(v)))
-	if strs.has("DO_TRANSITION"):
-		name = "DO_TRANSITION"
-	elif not strs.is_empty():
-		name = strs[0]
-	for v in a:
-		if int(v["k"]) == K_INT and _pages.has(int(v["v"])):
-			pg = int(v["v"])
-	for v in a:
-		if int(v["k"]) == K_INT:
-			var iv := int(v["v"])
-			if iv >= 50 and iv <= 30000 and iv != pg:
-				dur = iv
-	if name != "DO_TRANSITION":
+	# Engine semantics (pinned 2026-11-06 from pic/transit mjil):
+	# do_event_single(-1, name$, payload...) fires the named event's
+	# hooked workers with the payload and BLOCKS the caller until
+	# every spawned worker thread has finished; a click kills the
+	# workers and skips the caller to its armed bsel.5 destructor
+	# (handled in _tick_waits). The transition effects themselves
+	# are script code (transit.mjil / transit_top.mjil): workers
+	# self-select on the effect number, claim the transition via
+	# $$trans_notice@PIC's thread-int lock, and animate a sprite
+	# created on the transition page. The -1 and the name are the
+	# engine's own arguments; hooks receive only the payload.
+	var t: Dictionary = vm._cur
+	if bool(t.get("join_done", false)):
+		t.erase("join_done")
+		return MajiroVm.vint(0)
+	var name_idx := -1
+	var nm := ""
+	for k in range(a.size()):
+		if int(a[k]["k"]) == K_STRING:
+			var s := MajiroText.decode_cp932(_ab(a[k]))
+			if s == "DO_TRANSITION" or s == "DO_TOP_TRANSITION":
+				name_idx = k
+				nm = s
+				break
+	if name_idx < 0:
 		unhandled[0x29F1AC40] = int(unhandled.get(0x29F1AC40, 0)) + 1
 		return MajiroVm.vint(0)
-	var t: Dictionary = vm._cur
-	if bool(t.get("trans_done", false)):
-		# The transition finished: return normally. The caller's
-		# bsel.5 destructor (frame return path in the VM) does the
-		# cleanup the pic/transit pattern expects.
-		t.erase("trans_done")
+	var payload: Array = a.slice(name_idx + 1)
+	var tids: Array = []
+	for fn in _event_hooks.get(nm, []):
+		tids.append(vm.spawn_function(int(fn), payload))
+	for fn in _event_hooks_after.get(nm, []):
+		tids.append(vm.spawn_function(int(fn), payload))
+	if tids.is_empty():
 		return MajiroVm.vint(0)
-	if pg >= 0:
-		_begin_trans(pg, dur)
-	t["stage_trans_until"] = time_ms + dur
+	t["join_tids"] = tids
 	_suspend()
 	return MajiroVm.vint(0)
 

@@ -285,7 +285,7 @@ sprite_release 条），本节再无未钉到 handler 级的残项。
 - **$exec（0x718EF651）/ $call（0xCD00D280）**按 FUN_0040ff60 / FUN_0040fc30 实装；$exec 转移后由 VM 派发 **HOT_RESET(0, "", 0)**（exe 内置事件，无脚本 fire 点），console 的 hot_reset 分支据此重读 sysdata.cfg 并复位 fc/dc/kmk。
 - **load_library 首次加载即启动库 main**：在库 entrypoint 追加线程（17 个 LIBMAIN 实测）；只加载不开 main 是整批子系统（console/pic/config…）从未初始化的根因。
 - **get_variable / set_variable / curpos_x / curpos_y**：变量名哈希 = **明文 CRC-32**（zlib 同款；以 "#musicvol@CONFIG" 0x5731EA89 等三例对齐）。get/set 经 VM 派发核心处理（栈序：名在末、set 的值在首）；'#' 名走 persistent 合成存储，其余走 savefile 存储，已存在单元优先于 sigil 判定。curpos 返回 Stage 追踪的鼠标坐标。此四者原为桩时，config 的逐项滑杆 worker（$026db55c）全部空转。
-- **未知 syscall 收敛**：全流程实测仅剩 reg_read（0x80177286）、show_mouse_cursor（0xAB13BE44）、$c438ba98（0xC438BA98，FUN_0042A050 钉死为引擎记账：锁存/清零/指针交换，无呈现语义，桩正当）。save 系（save_enable / save_menu_enable / save_point / save_menu_disable 0x44B5C4ED）为记账 no-op；get_save_info$（0x65075141）/ get_save_time$（0xA549E852）在无存档后端时返回空串（空槽的原生答法），reg_write（0x9A1ACECA）no-op。**存档后端本身未实装**（见 12.7）。
+- **未知 syscall 收敛**：全流程实测仅剩 reg_read（0x80177286）、show_mouse_cursor（0xAB13BE44）、$c438ba98（0xC438BA98，FUN_0042A050 钉死为引擎记账：锁存/清零/指针交换，无呈现语义，桩正当）。save 系（save_enable / save_menu_enable / save_point / save_menu_disable 0x44B5C4ED）为记账 no-op；reg_write（0x9A1ACECA）no-op。**存档读取已实装**（2026-11-06，见 12.7）：启动时恢复 majiro_system.mss 的 PERSISTENT 作用域，get_save_info$（0x65075141）/ get_save_time$（0xA549E852）读真实 .sav 文件头/时间；写入与 do_load 状态恢复仍未实装。
 
 ### 12.3 Console / 文本
 
@@ -301,6 +301,7 @@ sprite_release 条），本节再无未钉到 handler 级的残项。
 - **sprite_push / sprite_pop 是精灵表搁置**：push 把当前精灵表整体藏起（子屏期间不显示）、新表从空开始；pop 丢弃子屏表、按搁置时的可见性恢复原表。仅 config/loadsave 使用。旧实现只存不用，Load 面板精灵被压在标题精灵之下永不见光。
 - **pic_unpack 分流**：解码图 ≥ 页 → 整页替换（章节背景；1280×960 原画以 0.8 全幅压入 1024×768、左上对齐，与 Wine 基线三地标 NCC 0.978–0.998 一致）；解码图 < 页 → **贴印**：按 (x, y) 偏移、经其 `_.rc8` alfa 伴随（极性 255=全透明）blend onto 页（loadsave 的 52×53 印章即此，脚本偏移 (138,76)）。旧实现的无条件整页替换曾把画完的 Load 面板连 20 行字一并抹掉。
 - **page_set_antidata（0xF9705332）**实装（color 页挂 alfa 伴随页）；grp_copy 的 9999 宽高是「整页」哨兵，由裁剪收敛。
+- **grp_copy / grp_extcopy 的 6 参短形式**：脚本常只给 (src, sx, sy, w, h, dst)，原生默认 **dx=sx、dy=sy**（FUN_00422310 实证：argc≤6 时 dst_x 取 sx 槽、≤7 时 dst_y 取 sy 槽）。早期实现默认 (0,0)，使 omake 屏 wipe 的 42 条 12×768 条带全叠在 x=0——两牌左缘同为背景花纹，画面逐字节不变，一度误判「Extra 选后无反应」。
 - **章节取景定案**：背景原画全幅 0.8 squash、左上对齐，与原版一致（旧目测位移说撤回）。
 
 ### 12.5 fontout 家族与 grp_mulboxfill（REA 反编译钉死）
@@ -314,8 +315,12 @@ sprite_release 条），本节再无未钉到 handler 级的残项。
 
 - 标题菜单四去向全验：New Game → 章节链（STA000 245+ 条文本、背景链 sky01/EA01 上屏）；**Continue/Load 上屏**（Load File's 台账 20 行 + 页签 + 印章 + Back）；**Option/Config 上屏**（環境設定全条目、滑杆、文字速度 1837；push/pop 修正后回归无恙）；**Exit 完整框**（模态变暗 + 问题文 + はい/いいえ）。
 - 标题菜单 30 秒超时（sel=7 → attract/demo）未验；Wine 原版 Config/Load 基线截图未取到（原版进程在对照机上反复退出/窗口漂移），两屏按脚本 + 牌图 + cfg 数据对齐，未做原版像素对照。
+- **Extra / omake 中枢已验**（2026-11-06）：以真实通关档（majiro_system.mss 中 $c88dfb04=1）启动，标题出现第 5 项 Extra（buttonmenu_set 面积 4@374,623 实测），选中返回 4；中枢屏（start.mjil block_01f8b 在标题函数内自建）经 wipe 条带动画呈现（短形式默认偏移修正后），四子项可选；子项 1 派发 $$cg_mode@CGMODE，cgmode.cfg 读入、画廊建成并停在其点击等待循环（cgmode:0x3614 的 areaevent_check + wait(2)，退出标志由面积回调写 $2619c6dd）——中枢本体闭环。画廊**内部**呈现残留见 12.7。
 
 ### 12.7 残留
 
-- 存档后端未实装：get_save_info$ 恒空串（Load 屏全 No Data 是真实状态非渲染缺失）；save/load 的 .sav/.mss 读写未做（格式已在 majiro-format §§13/16/17 钉死）。
-- DO_TRANSITION 效果码未全，现为 crossfade 近似；page6=目标页改码（$faea5953 现由 $$main@PIC 写入 FRONT）未做；attract 模式未验；argcheck 噪声为脚本级标注（无害）。
+- **期5 转场（脚本派发）已实装并实测**（2026-11-06）：do_event_single 按 pic/transit 的 mjil 语义实装——以事件名定位参数串、payload 派发给全部钩子 worker，调用线程 join 等待全体 worker 结束，点击则杀 worker 并跳调用方析构。章节链实测 21 次转场真派发（claim 锁 $$trans_notice@PIC 只响一次 dialog_error_ok 桩）。曾报「errors 314 vs 基线 103」经频率表定案：**全部是 argcheck 标注噪声**，其中 210 条 = 21 次转场 × 10 个声明 4 参却收 6 参 payload 的钩子函数（游戏数据自带，引擎自身亦如此派发），非缺陷。DO_TOP_TRANSITION 走同一路径但活体未验；transit_top worker 的 page6 目标页语义未普查。
+- **make_alfa_table（0x3CAD3884）已实装**（exe FUN_00423520 + FUN_00459f60）：两页须 8bpp、数组 ≥256 项钳制建表，dst[i] = table[src[i]]（R 通道即索引字节）；transit 的渐变 worker 据此逐帧重映射 alfa 页。
+- **存档读取已实装**（2026-11-06，格式见 majiro-format §§16/17/19）：VM `load_persistents` 在 boot 前恢复 system.mss 的 PERSISTENT 作用域（标量进合成存储、数组按 §16.2 blob 对象解码进单元存储）；播放器在 game_dir/savedata/ 存在 majiro_system.mss 时自动载入。Extra 解锁门 $c88dfb04 即经此生效（真实通关档实测标题多出 Extra 项）。get_save_info$ / get_save_time$ 读真实 .sav（文件名规则与 §16 同：last/%04d/quick）；Load 屏第 2 页签的真实标题行尚未探针验证（存档 0101/0102 应在该页签）。**存档写入与 do_load 线程状态恢复仍未实装**；readmark 既読存储未实装（§13 格式已钉死）；copy_thumbnail（0x78A6A112，FUN_00429180 语义已反编译）未实装——真实档缩略图均为 1×1 占位，无视觉价值，优先级低。
+- **画廊（CG Room）内部呈现未落定**：中枢子项 1 派发后画廊逻辑建成并等待点击，但前台停在进画廊前的变暗标题底图、画廊底板未合成。已定位的线索：cgmode 的 cfg 指令流解释中有 pic_unpack 收到空名（值 0）失败两例（页 65664/65665 无图）；另有 cgmode 专用 syscall **0x99a5de25** 未实装——exe FUN_00429f30 钉死为**资源存在性查询**（去扩展名 → 名哈希 → 查 exe 内置表 → 1/0），现桩返回 0 可能使画廊条目被整体跳过。其余三间 Room（回想 / 音乐 / ED）未探。
+- attract 模式（菜单超时 sel=7）未验；标题菜单 30 秒超时默认回标题的呈现未验。
