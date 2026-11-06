@@ -45,15 +45,23 @@ static func _unpack(data: PackedByteArray, start: int, w: int, h: int,
 		out[i] = data[start + i]
 	var src := start + depth
 	var dst := depth
-	while dst < total:
+	# Input-bounded: the fan-patch encoder (updateCHS .rct files)
+	# emits literal-only streams that end up to a few pixels short
+	# of w*h; a decoder that loops on output size alone reads one
+	# command past EOF. Stop at the end of the stream and leave
+	# any uncovered tail zeroed.
+	while dst < total and src < data.size():
 		var cmd := data[src]
 		src += 1
 		if cmd & 0x80 == 0:
 			var count := cmd
 			if count == 0x7f:
+				if src + 2 > data.size():
+					break
 				count += data.decode_u16(src)
 				src += 2
 			count = (count + 1) * depth
+			count = mini(count, mini(data.size() - src, total - dst))
 			for i in count:
 				out[dst + i] = data[src + i]
 			src += count
@@ -61,9 +69,12 @@ static func _unpack(data: PackedByteArray, start: int, w: int, h: int,
 		else:
 			var count2 := cmd & count_mask
 			if count2 == count_mask:
+				if src + 2 > data.size():
+					break
 				count2 += data.decode_u16(src)
 				src += 2
 			count2 = (count2 + count_base) * depth
+			count2 = mini(count2, total - dst)
 			var shift: int = shifts[(cmd & 0x7f) >> shift_start] * depth
 			var s0 := dst + shift
 			if -shift >= count2:

@@ -71,6 +71,12 @@ func attach(vm: MajiroVm) -> void:
 	s[0xE4E3B40D] = _file_open        # file_open
 	s[0xD6333B3C] = _file_close       # file_close
 	s[0x2539D212] = _file_read        # file_read   -> int
+	# Save-slot metadata: no save backend yet, so every slot
+	# reads as empty (the native answer for a slot with no save
+	# file) instead of an int 0 the scripts misread as a string.
+	s[0x65075141] = func(_a: Array) -> Dictionary: return vstr(PackedByteArray())  # get_save_info$
+	s[0xA549E852] = func(_a: Array) -> Dictionary: return vstr(PackedByteArray())  # get_save_time$
+	s[0x9A1ACECA] = func(_a: Array) -> Dictionary: return vint(0)  # reg_write (no-op)
 	s[0x55232561] = _file_read_str    # file_read$  -> string token
 	s[0x6008BEBB] = _file_read_line   # file_read_line$
 	s[0xE8A6A59F] = _file_read_line   # file_read_line_raw$ (approx)
@@ -90,6 +96,7 @@ func attach(vm: MajiroVm) -> void:
 	s[0x06906970] = _strleft          # strleft$
 	s[0x25401A1F] = _strright         # strright$
 	s[0x69DB4512] = _strstr           # strstr
+	s[0xB0C8F550] = _strlen           # strlen
 	s[0x6F769889] = _itoa             # itoa$
 	s[0x3D053317] = _min2             # min
 	s[0x6CFC884A] = _max2             # max
@@ -186,23 +193,43 @@ func _file_puts(_args: Array) -> Dictionary:
 
 # Scanner: tokens are separated by whitespace; // comments run to EOL.
 func _scan_token(st: Dictionary) -> PackedByteArray:
+	# Engine field reader (file_read$ / file_read), pinned
+	# 2026-11-05 against sysdata.cfg: fields are separated by
+	# commas and newlines, "//" comments run to end of line, and
+	# spaces/tabs inside a field are kept (the font name
+	# "ＭＳ 明朝" is ONE field). Empty fields are skipped. The
+	# old whitespace tokenizer split that font name in two and
+	# shifted every later cfg value by two fields (conall_x read
+	# back as the font size 24).
 	var data: PackedByteArray = st["data"]
 	var pos := int(st["pos"])
 	var n := data.size()
-	while pos < n:
-		var c := data[pos]
-		if c == 0x2f and pos + 1 < n and data[pos + 1] == 0x2f:
-			while pos < n and data[pos] != 0x0a:
+	while true:
+		while pos < n:
+			var c := data[pos]
+			if c == 0x2f and pos + 1 < n and data[pos + 1] == 0x2f:
+				while pos < n and data[pos] != 0x0a:
+					pos += 1
+			elif c == 0x2c or c == 0x0a or c == 0x0d or c == 0x20 or c == 0x09:
 				pos += 1
-		elif c <= 0x20:
-			pos += 1
-		else:
+			else:
+				break
+		if pos >= n:
 			break
-	var start := pos
-	while pos < n and data[pos] > 0x20:
-		pos += 1
+		var start := pos
+		var end := pos
+		while pos < n:
+			var c2 := data[pos]
+			if c2 == 0x2c or c2 == 0x0a or (c2 == 0x2f and pos + 1 < n and data[pos + 1] == 0x2f):
+				break
+			pos += 1
+			if c2 != 0x20 and c2 != 0x09 and c2 != 0x0d:
+				end = pos
+		st["pos"] = pos
+		if end > start:
+			return data.slice(start, end)
 	st["pos"] = pos
-	return data.slice(start, pos)
+	return PackedByteArray()
 
 
 func _file_read(args: Array) -> Dictionary:
@@ -219,7 +246,8 @@ func _file_read_str(args: Array) -> Dictionary:
 	var st: Variant = _handles.get(_as_int(args[0]), null)
 	if st == null:
 		return vstr(PackedByteArray())
-	return vstr(_scan_token(st))
+	var t2 := _scan_token(st)
+	return vstr(t2)
 
 
 func _file_read_line(args: Array) -> Dictionary:
@@ -288,7 +316,14 @@ func _strleft(args: Array) -> Dictionary:
 	if args.size() < 2:
 		return vstr(PackedByteArray())
 	var b := _as_bytes(args[0])
-	var n: int = clampi(_as_int(args[1]), 0, b.size())
+	# Engine semantics (FUN_00402470): the count is compared UNSIGNED
+	# against the length; n >= len (including n = -1) returns the
+	# whole string. Clamping -1 to 0 used to erase dot-less image
+	# names in pic_back's extension strip, turning every such
+	# background into "black" (found 2026-11-05).
+	var n := _as_int(args[1])
+	if n < 0 or n >= b.size():
+		return vstr(b)
 	return vstr(b.slice(0, n))
 
 
@@ -296,8 +331,17 @@ func _strright(args: Array) -> Dictionary:
 	if args.size() < 2:
 		return vstr(PackedByteArray())
 	var b := _as_bytes(args[0])
-	var n: int = clampi(_as_int(args[1]), 0, b.size())
+	# Same unsigned-count rule as strleft$ (FUN_004024F0).
+	var n := _as_int(args[1])
+	if n < 0 or n >= b.size():
+		return vstr(b)
 	return vstr(b.slice(b.size() - n))
+
+
+func _strlen(args: Array) -> Dictionary:
+	if args.is_empty():
+		return vint(0)
+	return vint(_as_bytes(args[0]).size())
 
 
 func _strstr(args: Array) -> Dictionary:
@@ -365,5 +409,13 @@ func _rgb(args: Array) -> Dictionary:
 func _file_exists(args: Array) -> Dictionary:
 	if args.is_empty() or not read_file.is_valid():
 		return vint(0)
-	var name := _as_bytes(args[0]).get_string_from_ascii()
-	return vint(0 if (read_file.call(name) as PackedByteArray).is_empty() else 1)
+	# Scripts pass bare image names; the engine completes them with
+	# the .rct / .rc8 extensions (same rule as the stage's decoder).
+	# Without the completion, pic_is_exist false-negatives and the
+	# pic layer substitutes its CDUMMY placeholder art.
+	var raw := _as_bytes(args[0])
+	for cand in [raw, raw + ".rct".to_ascii_buffer(), raw + ".rc8".to_ascii_buffer()]:
+		var name := (cand as PackedByteArray).get_string_from_ascii()
+		if not (read_file.call(name) as PackedByteArray).is_empty():
+			return vint(1)
+	return vint(0)

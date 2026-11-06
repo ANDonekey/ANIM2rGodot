@@ -1,6 +1,6 @@
 # Majiro 表现层设计规格
 
-状态：调研完成，待批准后实现。
+状态：用户 2026-11-03 批准实现；期 1–4 主体与期 5 部分已落地（2026-11-04，见文末 §11 实现附记）。
 证据标注：= 本项目在 STARLESS 语料/exe 上验证；= 社区资料
 （MajiroTools wiki），与实测冲突时以实测为准。
 
@@ -103,9 +103,12 @@ sprite[+0x3AC]=1（ext 标志，置位后源矩形/表面走 [0xEC..EF]
 sprite_get_pos_x/y、sprite_len_x/y（= 源矩形 xl/yl）、
 sprite_get_page(spr)。
 - sprite_release(spr)：摘链 + 脏矩形登记后销毁；sprite[8]≠0 时
-连带释放其主页面与 alfa 页（FUN_0044c920；[8] 的置位者未单独
-反编译，实现期以 pic 库调用点对账为准——这是本节唯一未钉到
-handler 级的细节）。
+连带释放其主页面与 alfa 页（FUN_0044c920）。[8] 的置位者 =
+sprite_page_auto_release(spr)（0x8838FD56，FUN_0044CA10 汇编：
+沿 sprite 链表找到该 sprite 后 `movl $1, 0x20(%ecx)`，即
+[8]=1；2026-11-04 对账钉死）。全语料调用点仅 3 处（pic 1、
+yazlib 2），均为 sprite_create 后立即对新 sprite 调用，与本
+播放器实现（auto_rel 标志）一致。
 - sprite_alfa_set(spr, alfa, [dur])：alfa 为**透明度**（0=不透
 明、255=全透明，与 alfa 页极性一致）；第 3 参 = 淡变时长 ms，
 缺省/0 即时置 [0xB]；非 0 起动画（[0xA3]=起始值、[0xA5]=
@@ -154,6 +157,8 @@ $F7AC8CD8（console 库的开启入口，2 参透传），置开启标志；
 console_off 对称。即消息窗的显隐动画等行为由 console.mjil
 线程执行，引擎只维护文本域与历史缓冲（histbuff_*、
 console_hist_pos/num_hist/prev/next/replay）。
+> **修正（2026-11-06）：本条作废。** $F7AC8CD8 在脚本与 exe 中
+> 均不存在；CONSOLE_ON/OFF/CLS/WROTE 是引擎内置事件，详见 §12.1。
 
 ## 6. 输入 / 热区模型
 
@@ -250,7 +255,67 @@ page_create_file(_withalfa) → 标题画面渲染与原版对账。
 - **console 字体** = OS 字体名（默认 ＭＳ 明朝，源自
 sysdata.cfg）；本播放器固定选一种明朝系系统字体、只取尺寸
 参数，Longinus 钩子不进播放器（见 §5，用户 2026-10-29 拍板）。
-- 唯一未钉到 handler 级的残项：sprite[8]（release 时连带释页
-的标志）的置位者，实现期以 pic 库调用点对账为准，不影响
-分期接口。
+- sprite[8]（release 时连带释页的标志）的置位者已于
+2026-11-04 对账钉死：sprite_page_auto_release（见前文
+sprite_release 条），本节再无未钉到 handler 级的残项。
 - movie_*（OP 动画 MPG）不在本设计范围，另行立项（不变）。
+
+## 11. 实现附记（2026-11-04，实现期钉死/修正）
+
+以下为实现期以 exe 汇编与主机对照实测钉死的语义，前文与此冲突处以本节为准：
+
+- **实参引擎序**：函数调用与 syscall 的 arg0 = 最后压栈的值（exe 句柄自值栈顶向下读取；FUN_00420F80 page_create 汇编、yazlib 淡入 worker 的实参用途双证）。§3 的 page_create(w, h, flag) 等签名均按引擎序书写；实现时 VM 的 frame.args 与 syscall 分发都取反转序。脚本侧的压栈序是「先名义末参、后首参」的逆序，不要按压栈序读签名。
+- **bsel.5（0x847）的真身是帧析构登记**：FUN_00413640 只把目标写入帧上下文 +0x24（mjil 标注 `@destructor`）。帧 ret 时先以该帧上下文执行析构、析构的 ret 才完成返回；thread_end 杀线程时先跑顶帧析构；点击跳过 = 宿主中断等待直跑析构；do_event_single("DO_TRANSITION") 只是阻塞至时长届满（或点击提前结束）后正常返回——不需要跳转模型。pic 等待环轮询的 $1635363c 实为 thread_begin 返回的 tid，工作线程的析构负责置 0。
+- **等待族补正**：wait(≤0) 是帧同步等待（一帧）；另有 timer_sync(state, 间隔) → 新 state（0xFF75CD29，非 wait 变体）；timer（0x6584F13E）/get_current_time$ 返回引擎毫秒时钟。宿主等待键必须由重入的处理函数自有，tick 唤醒时不得删键（否则 wait 永久重装）。
+- **areaevent**：areaevent_set 引擎序 (id, x, y, xl, yl, on, off, click, flags)；回调实参 = 区域自身的 (id, x, y, xl, yl)；分发由脚本循环调用 areaevent_check（0x3A3BFB29）完成；区域点击锁存独立于 mk_unwait。event_hook/event_hook_after 按名登记（实参序：名、函数哈希），do_event 以事件实参逐个 spawn 处理线程。
+- **sprite_paste（0x4AB0CAEF）**：(dst_page, src_page)，按 sprite 的位置/alfa/掩码把显示 src_page 的 sprite 光栅化进 dst_page（FUN_0044C5E0 遍历 sprite 链表匹配页对）。
+- **呈现残留**：page6=0 的 sprite（如标题图案背景）其呈现面（backbuffer/翻页）语义未明，暂未上屏；DO_TRANSITION 的效果码（负数、500 等）仅以淡入近似；grp 像素编辑走每页字节缓存（px cache），脚本逐行 extcopy 特效靠它才达到可用速度。
+
+## 12. 实现附记二（2026-11-05/06，呈现层全量钉死；前文与本节冲突处以本节为准）
+
+### 12.1 对 §5 / §11 的修正
+
+- **§5 的「$F7AC8CD8 回调」不存在**：该哈希在全部脚本记录与 exe 中均无踪迹。引擎的真实模型是**引擎内置事件**：console_on/console_off syscall 触发 CONSOLE_ON / CONSOLE_OFF 事件，ctrl "w" 触发 CONSOLE_CLS，消息提交触发 CONSOLE_WROTE；脚本侧以 event_hook / event_hook_after 按名订阅（$$main@CONSOLE 登记的即这批）。console_on 本体（FUN_0041DE90）只维护引擎状态。
+- **§11 的 sprite_paste 签名作废**：真签名是 **sprite_paste(sprite, page)**（FUN_0044C5E0 按精灵表/页表分别校验两参）。旧实现按 (dst, src) 解读时静默全灭，是标题屏黑屏的主因之一。
+- **§11「page6=0 图案背景未上屏」销项**：标题图案/LOGO 的呈现面就是 FRONT 合成帧（见 12.4），菜单态截图实测干净（白晕亦销项：所谓白晕是 alfa 伴随页未挂时的误读）。
+
+### 12.2 VM / 调度
+
+- **spawn_function 实参序**：宿主 spawn（event/hook/button 回调）收到的是源码序参数，须在内部反转为 thread_begin 的栈序；早期未反转使 button_menu 恒返回 30（超时值），菜单四项从未真正选中（两份「已验证」报告已撤回）。
+- **$exec（0x718EF651）/ $call（0xCD00D280）**按 FUN_0040ff60 / FUN_0040fc30 实装；$exec 转移后由 VM 派发 **HOT_RESET(0, "", 0)**（exe 内置事件，无脚本 fire 点），console 的 hot_reset 分支据此重读 sysdata.cfg 并复位 fc/dc/kmk。
+- **load_library 首次加载即启动库 main**：在库 entrypoint 追加线程（17 个 LIBMAIN 实测）；只加载不开 main 是整批子系统（console/pic/config…）从未初始化的根因。
+- **get_variable / set_variable / curpos_x / curpos_y**：变量名哈希 = **明文 CRC-32**（zlib 同款；以 "#musicvol@CONFIG" 0x5731EA89 等三例对齐）。get/set 经 VM 派发核心处理（栈序：名在末、set 的值在首）；'#' 名走 persistent 合成存储，其余走 savefile 存储，已存在单元优先于 sigil 判定。curpos 返回 Stage 追踪的鼠标坐标。此四者原为桩时，config 的逐项滑杆 worker（$026db55c）全部空转。
+- **未知 syscall 收敛**：全流程实测仅剩 reg_read（0x80177286）、show_mouse_cursor（0xAB13BE44）、$c438ba98（0xC438BA98，FUN_0042A050 钉死为引擎记账：锁存/清零/指针交换，无呈现语义，桩正当）。save 系（save_enable / save_menu_enable / save_point / save_menu_disable 0x44B5C4ED）为记账 no-op；get_save_info$（0x65075141）/ get_save_time$（0xA549E852）在无存档后端时返回空串（空槽的原生答法），reg_write（0x9A1ACECA）no-op。**存档后端本身未实装**（见 12.7）。
+
+### 12.3 Console / 文本
+
+- **cfg 字段读取器**：字段以逗号/换行定界，`//` 注释到行尾，**字段内空格保留**（「ＭＳ 明朝」是一个字段），空字段跳过。旧实现按空白切分使全部 console 几何量错位轮转。config.cfg 以同一读取器离线模拟与运行时令牌流逐一对齐（567 令牌）。
+- **CONSOLE_WROTE 按行带真实参数**：原生在每行字形落页**之后**才发事件，参数 = (con_draw 页, x, y_中心 = pos.y + yl/2, 行宽 px, yl, zerotime=0)；实现改为 bake 作业携带参数、落页后触发。事件泵顺序化：泵在 ctrl "w" 遇未排空的 bake 队列时停驻，避免旧字形盖新窗。
+- **bake 字体/配色在 console_set 时刻捕获**；**阴影 alpha 来自 console_color 第二参的顶字节**（kmk；hot_reset 置 1 → 约 0.4%，几不可见）。早期实现丢弃顶字节、全强度黑影把白字压成暗团——一度误报为「原生深色字」，已撤回。原生正文 = 白字 + 极淡影。
+- **get_mojispeed**：先读 set 值，非零用之；否则读 config 持久值 $ddf4e4e2（实测 1837）；再否则 50。timer_progress 源序 = (start_tick, duration_ms, max)。
+- **文字门闩与探针脚手架的教训**：`--hold-text` 类「按住文本」的调试开关若其释放路径依赖被测事件本身，会把流程永久钉在第一处等待并伪装成引擎停顿（曾误判「69 条齐停」）。产品代码无此类开关。
+
+### 12.4 Page / Sprite / 合成
+
+- **FRONT 是合成帧**：原生 frontbuffer 是软件合成结果（含精灵）。子屏（config/loadsave）以 grp_copy 自 FRONT 取景作底图；实现中 FRONT 页平时只有直绘内容，故 _blit_pair/_extcopy_pair 以 FRONT 为源时先由 Stage 抓 SubViewport 纹理回填 FRONT 页（_refresh_front）。
+- **sprite_push / sprite_pop 是精灵表搁置**：push 把当前精灵表整体藏起（子屏期间不显示）、新表从空开始；pop 丢弃子屏表、按搁置时的可见性恢复原表。仅 config/loadsave 使用。旧实现只存不用，Load 面板精灵被压在标题精灵之下永不见光。
+- **pic_unpack 分流**：解码图 ≥ 页 → 整页替换（章节背景；1280×960 原画以 0.8 全幅压入 1024×768、左上对齐，与 Wine 基线三地标 NCC 0.978–0.998 一致）；解码图 < 页 → **贴印**：按 (x, y) 偏移、经其 `_.rc8` alfa 伴随（极性 255=全透明）blend onto 页（loadsave 的 52×53 印章即此，脚本偏移 (138,76)）。旧实现的无条件整页替换曾把画完的 Load 面板连 20 行字一并抹掉。
+- **page_set_antidata（0xF9705332）**实装（color 页挂 alfa 伴随页）；grp_copy 的 9999 宽高是「整页」哨兵，由裁剪收敛。
+- **章节取景定案**：背景原画全幅 0.8 squash、左上对齐，与原版一致（旧目测位移说撤回）。
+
+### 12.5 fontout 家族与 grp_mulboxfill（REA 反编译钉死）
+
+- 四个 setter 惰性创建**每线程共享的 fontout 上下文**（0x6C B，模板在 exe 0x4A7258）：locate(page,x,y) 置 ctx 页/笔；color(main, sub=-1)；font(name$, h=20, w=h/2, step=⌊h×5/4⌋, extra=0)，名字含「明朝」（CP932 字节）置 Mincho 标志；push/pop 链式存取上下文。
+- **fontout 本体**：无 box 时在笔位绘、返回行宽、笔 x += 行宽；带 (box_w, box_h[, align]) 时 align −2 右 / −1 左 / 其它 居中，y 临时居中、绘后恢复。渲染器 = GDI TextOutA 逐字缓存；**Mincho 合成粗体** = 同字 x+1 再绘一次；sub 色低 24 位为影/边色、顶字节（&0x7F）为模式：0 = 单影（偏移 max(1,h/9), max(1,h/18)），1 = 八邻描边（δ=max(1,h/18)）；sub=−1 无影。w/step/extra 不被渲染器消费（推进量纯量宽）。
+- **UI 记录字符串固定 cp932 解码**：config/loadsave/message_box 三库不在汉化补丁内（补丁只有 scenario + 少量 .rct），其 fontout 文本是日文原文。
+- **grp_mulboxfill（0x61BAE53C）**：(page, x, y, w, h, color)，仅 24bpp 页；逐像素 ch := ch × (m+1) >> 8（COLORREF 序）。
+
+### 12.6 子屏终验（2026-11-06，全部截图实证）
+
+- 标题菜单四去向全验：New Game → 章节链（STA000 245+ 条文本、背景链 sky01/EA01 上屏）；**Continue/Load 上屏**（Load File's 台账 20 行 + 页签 + 印章 + Back）；**Option/Config 上屏**（環境設定全条目、滑杆、文字速度 1837；push/pop 修正后回归无恙）；**Exit 完整框**（模态变暗 + 问题文 + はい/いいえ）。
+- 标题菜单 30 秒超时（sel=7 → attract/demo）未验；Wine 原版 Config/Load 基线截图未取到（原版进程在对照机上反复退出/窗口漂移），两屏按脚本 + 牌图 + cfg 数据对齐，未做原版像素对照。
+
+### 12.7 残留
+
+- 存档后端未实装：get_save_info$ 恒空串（Load 屏全 No Data 是真实状态非渲染缺失）；save/load 的 .sav/.mss 读写未做（格式已在 majiro-format §§13/16/17 钉死）。
+- DO_TRANSITION 效果码未全，现为 crossfade 近似；page6=目标页改码（$faea5953 现由 $$main@PIC 写入 FRONT）未做；attract 模式未验；argcheck 噪声为脚本级标注（无害）。

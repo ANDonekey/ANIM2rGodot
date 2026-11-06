@@ -24,7 +24,19 @@ static func _table(path: String) -> PackedByteArray:
 	return data
 
 
+static var _chs_tbl := PackedByteArray()
+
+
+## CHS fan-patch table (CHS.TBL from the game dir, 61440 u16 entries indexed
+## by the CP932 pair value; each nonzero entry is a GBK code). Set by the
+## player at boot when the file exists.
+static func set_chs_table(data: PackedByteArray) -> void:
+	_chs_tbl = data
+
+
 static func decode(bytes: PackedByteArray, codec: String) -> String:
+	if codec == "chs" and _chs_tbl.size() >= 122880:
+		return _decode_chs(bytes)
 	var tab := _table(CP932_PATH if codec == "cp932" else GBK_PATH)
 	if tab.size() < 131584:
 		return bytes.get_string_from_ascii()
@@ -40,6 +52,40 @@ static func decode(bytes: PackedByteArray, codec: String) -> String:
 				continue
 			var cp := tab.decode_u16(512 + ((b << 8) | bytes[i + 1]) * 2)
 			_append_cp(out, cp)
+			i += 2
+		else:
+			_append_cp(out, single)
+			i += 1
+	return out.get_string_from_utf8()
+
+
+## CHS patch encoding: the string bytes are CP932-space pairs; each pair is
+## remapped through CHS.TBL to a GBK code whose glyph is the intended Chinese
+## character. Pairs missing from the table fall back to their CP932 glyph
+## (system scripts keep Japanese names/messages).
+static func _decode_chs(bytes: PackedByteArray) -> String:
+	var tab := _table(CP932_PATH)
+	var gtab := _table(GBK_PATH)
+	if tab.size() < 131584 or gtab.size() < 131584:
+		return bytes.get_string_from_ascii()
+	var out := PackedByteArray()
+	var i := 0
+	while i < bytes.size():
+		var b := bytes[i]
+		var single := tab.decode_u16(b * 2)
+		if single == 0xFFFF:
+			if i + 1 >= bytes.size():
+				_append_cp(out, 0xFFFD)
+				i += 1
+				continue
+			var pair := (b << 8) | bytes[i + 1]
+			var glyph := tab.decode_u16(512 + pair * 2)
+			var g := _chs_tbl.decode_u16(pair * 2)
+			if g != 0:
+				var cp := gtab.decode_u16(512 + g * 2)
+				if cp != 0xFFFD:
+					glyph = cp
+			_append_cp(out, glyph)
 			i += 2
 		else:
 			_append_cp(out, single)

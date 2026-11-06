@@ -32,17 +32,24 @@ const HASH_THREAD_BEGIN_CHILD := 0xAE497F1A
 const HASH_THREAD_END := 0x4EF903F3
 const HASH_LOAD_LIBRARY := 0x10DB0A43
 const HASH_LOAD_LIBRARY2 := 0x10DB0A44
+const HASH_EXEC := 0x718EF651
 const HASH_SCRIPT_CALL := 0xCD00D280
 
 var vfs: Callable
 var syscalls: Dictionary = {}
 var trace: Array = []
 var errors: Array = []
+## Test-harness event log (menu returns, $exec calls, area clicks);
+## the player prints and clears it in its periodic dump.
 var unknown_syscalls: Dictionary = {}
+## Bounded ring of the most recent executed instructions,
+## kept for error reports and test diagnostics.
+var debug_ring: Array = []
 var stats: Dictionary = {"steps": 0, "max_depth": 0, "calls": 0, "syscalls": 0}
 
 var _scripts: Array = [] # load order: [{name, mjo}]
 var _by_name: Dictionary = {}
+var _lib_mains_started := {}
 var _persist: Dictionary = {}
 var _save: Dictionary = {}
 var _persist_synth: Dictionary = {}
@@ -50,7 +57,6 @@ var _save_synth: Dictionary = {}
 var _threads: Array = []
 var _cur: Dictionary = {}
 var _halted := false
-var debug_ring: Array = []
 
 
 static func vint(i: int) -> Dictionary:
@@ -314,13 +320,17 @@ func boot(script_name: String) -> bool:
 	return true
 
 
+
+
 func _push_frame(thread: Dictionary, rec: Dictionary, offset: int, argc: int, ret_pc: int) -> void:
 	var frames: Array = thread["frames"]
 	var stack: Array = thread["stack"]
 	var base := stack.size() - argc
+	var fargs: Array = stack.slice(base, base + argc)
+	fargs.reverse()
 	frames.append({
-		"rec": rec, "pc": offset, "base": base,
-		"argc": argc, "args": stack.slice(base, base + argc),
+		"rec": rec, "pc": offset, "base": base, "entry": offset,
+		"argc": argc, "args": fargs,
 		"ret_pc": ret_pc, "locals": {}, "cells": [], "line": 0,
 	})
 	stats["max_depth"] = maxi(int(stats["max_depth"]), frames.size())
@@ -331,7 +341,7 @@ func run(max_steps: int) -> void:
 	while steps < max_steps and not _halted:
 		var progressed := false
 		for t in _threads:
-			if t["done"]:
+			if t["done"] or int(t.get("wait", 0)) != 0:
 				continue
 			_cur = t
 			steps += _step_thread(t, max_steps - steps)
@@ -346,7 +356,7 @@ func run(max_steps: int) -> void:
 func _step_thread(thread: Dictionary, budget: int) -> int:
 	var n := 0
 	var stack: Array = thread["stack"]
-	while n < budget and not thread["done"] and not _halted:
+	while n < budget and not thread["done"] and not _halted and int(thread.get("wait", 0)) == 0:
 		var frames: Array = thread["frames"]
 		if frames.is_empty():
 			thread["done"] = true
@@ -382,6 +392,22 @@ func _pop(thread: Dictionary) -> Dictionary:
 
 func _push(thread: Dictionary, v: Dictionary) -> void:
 	(thread["stack"] as Array).append(v)
+
+
+var text_gate: Callable
+
+## Sink for engine built-in events the VM itself must raise
+## (stage.fire_event): set by MajiroStage.attach.
+var event_sink: Callable
+
+
+## Suspend a thread at a text/proc opcode whose console gate is
+## closed: flag the wait and rewind the pc over the opcode so it
+## re-executes (and re-checks the gate) once the host wakes it.
+func _gate_suspend(thread: Dictionary, frame: Dictionary, ins: Dictionary) -> void:
+	thread["wait"] = 1
+	thread["text_wait"] = true
+	frame["pc"] = int(frame["pc"]) - int(ins["size"])
 
 
 func _exec(thread: Dictionary, frame: Dictionary, ins: Dictionary, at: int) -> void:
@@ -449,8 +475,14 @@ func _exec(thread: Dictionary, frame: Dictionary, ins: Dictionary, at: int) -> v
 		0x83F: # conv.r
 			_push(thread, vfloat(_as_float(_pop(thread))))
 		0x840: # text
+			if text_gate.is_valid() and not bool(text_gate.call()):
+				_gate_suspend(thread, frame, ins)
+				return
 			trace.append({"ev": "text", "s": ins["sraw"]})
 		0x841: # proc
+			if text_gate.is_valid() and not bool(text_gate.call()):
+				_gate_suspend(thread, frame, ins)
+				return
 			trace.append({"ev": "proc"})
 		0x842: # ctrl
 			trace.append({"ev": "ctrl", "s": ins["sraw"]})
@@ -458,8 +490,11 @@ func _exec(thread: Dictionary, frame: Dictionary, ins: Dictionary, at: int) -> v
 			frame["bsel"] = [0, 0, 0]
 		0x846: # bsel.jmp.4: unwind to the nearest frame holding an anchor (FUN_00413600)
 			_exec_bsel_jmp4(thread)
-		0x847: # bsel.5: handler FUN_00413640 not yet decompiled; not hit by the boot flow
-			unknown_syscalls["bsel_847"] = true
+		0x847: # bsel.5 (FUN_00413640, asm-verified): arm the current
+			# frame's destructor (state slot +0x24 in the exe's frame
+			# context). The destructor runs on frame return and on
+			# thread kill (mjil: "@destructor").
+			frame["dtor"] = at + int(ins["size"]) + int(ins["jo"])
 		0x850: # switch (FUN_00413370): out-of-range index selects the LAST entry (default)
 			var v := _as_int(_pop(thread))
 			var cases: Array = ins["cases"]
@@ -846,6 +881,14 @@ func _exec_call(thread: Dictionary, frame: Dictionary, ins: Dictionary, pop_resu
 
 func _exec_ret(thread: Dictionary) -> void:
 	var frames: Array = thread["frames"]
+	var top_frame: Dictionary = frames[frames.size() - 1]
+	if int(top_frame.get("dtor", 0)) != 0 and not bool(top_frame.get("in_dtor", false)):
+		# Run the frame's bsel.5 destructor instead of returning:
+		# the frame stays live (its locals/args are the destructor's
+		# context); the destructor's own ret completes the return.
+		top_frame["in_dtor"] = true
+		top_frame["pc"] = int(top_frame["dtor"])
+		return
 	var frame: Dictionary = frames.pop_back()
 	var stack: Array = thread["stack"]
 	var base: int = frame["base"]
@@ -868,29 +911,136 @@ func _exec_syscall(thread: Dictionary, ins: Dictionary, pop_result: bool) -> voi
 	var argc: int = ins["ac"]
 	var stack: Array = thread["stack"]
 	var args: Array = []
+	if stack.size() < argc:
+		errors.append("SYSCALL ARG UNDERFLOW hash=0x%08x argc=%d stack=%d ring=%s" % [hash, argc, stack.size(), " | ".join(debug_ring.slice(maxi(0, debug_ring.size() - 6)))])
+		_halted = true
+		return
 	for i in range(argc):
 		args.append(stack[stack.size() - argc + i])
 	for i in range(argc):
 		stack.pop_back()
 	stats["syscalls"] = int(stats["syscalls"]) + 1
 	var result := vint(0)
+	var transferred := false
 	if hash == HASH_LOAD_LIBRARY or hash == HASH_LOAD_LIBRARY2:
 		if args.size() >= 1 and int(args[0]["k"]) == K_STRING:
 			var nm := (args[0]["v"] as PackedByteArray).get_string_from_ascii()
-			if load_script(nm) != null:
+			var first_load := not _by_name.has(nm)
+			var lib: Variant = load_script(nm)
+			if lib != null:
 				result = vint(1)
+				# Engine behavior: loading a library also boots its
+				# $$main entrypoint as a resident thread -- the
+				# console record builds its window pages/sprites
+				# there, pic's main stores the frontbuffer handle,
+				# etc. Resolve-only loading left the console dead
+				# (console_set never fired; found 2026-11-05).
+				if first_load and not _lib_mains_started.has(nm):
+					_lib_mains_started[nm] = true
+					var lt := {"stack": [], "frames": [], "tvars": {},
+							"done": false, "wait": 0}
+					_threads.append(lt)
+					_push_frame(lt, lib, (lib["mjo"] as MajiroMjo).entrypoint_offset, 0, -1)
 	elif hash == HASH_THREAD_BEGIN or hash == HASH_THREAD_BEGIN_CHILD:
 		result = _thread_begin(thread, args)
 	elif hash == HASH_THREAD_END:
 		_thread_end(thread, args)
+	elif hash == HASH_EXEC:
+		transferred = _exec_script(thread, args)
+	elif hash == 0x1BB47604 or hash == 0x4D849AA6 or hash == 0xF8004993 or hash == 0x44B5C4ED:
+		# save_enable / save_menu_enable / save_point / save_menu_disable:
+		# save-system
+		# bookkeeping flags; no presentation effect in the player yet.
+		pass
 	elif hash == HASH_SCRIPT_CALL:
-		unknown_syscalls["script_call"] = true
+		transferred = _call_script(thread, args)
+	elif hash == 0x6E83677A:
+		# get_variable(name$): variable access by source name;
+		# the compiled hash is plain CRC-32 over the name bytes
+		# (verified: crc32("#musicvol@CONFIG") == 0x5731EA89).
+		result = _variable_by_name(args, false)
+	elif hash == 0xCD290AEF:
+		# set_variable(name$, value)
+		_variable_by_name(args, true)
 	elif syscalls.has(hash):
-		result = (syscalls[hash] as Callable).call(args)
+		var rargs: Array = args.duplicate()
+		rargs.reverse()
+		result = (syscalls[hash] as Callable).call(rargs)
 	else:
 		unknown_syscalls["0x%08x" % hash] = true
-	if not pop_result:
+	if thread.get("syscall_restore", false):
+		# The handler suspended this thread (pc already rewound by the
+		# host): restore the argument slice so the re-executed syscall
+		# sees the same stack as the first pass.
+		thread.erase("syscall_restore")
+		for a in args:
+			stack.append(a)
+	elif not pop_result and not transferred:
 		stack.append(result)
+
+
+## exec(filename, rest...): transfer the calling thread's execution
+## to the named script's entrypoint (exe FUN_0040ff60). The filename
+## is the top stack value; the remaining arguments stay on the value
+## stack as the new script's initial argument slice, the current
+## call stack is abandoned, and the script stores carry over. The
+## new script's code runs in this same thread. Returns true when the
+## transfer happened (the caller must not push a syscall result).
+func _exec_script(thread: Dictionary, args: Array) -> bool:
+	if args.is_empty() or int(args[args.size() - 1]["k"]) != K_STRING:
+		return false
+	var nm := MajiroText.decode_cp932(args[args.size() - 1]["v"] as PackedByteArray)
+	var rec: Variant = load_script(nm)
+	if rec == null and nm != nm.to_lower():
+		rec = load_script(nm.to_lower())
+	if rec == null:
+		errors.append("exec: script not found: " + nm)
+		return false
+	var extras: Array = args.slice(0, args.size() - 1)
+	thread["frames"] = []
+	thread["stack"] = extras.duplicate()
+	thread["done"] = false
+	thread["wait"] = 0
+	_push_frame(thread, rec, (rec["mjo"] as MajiroMjo).entrypoint_offset, extras.size(), -1)
+	# The engine fires its built-in HOT_RESET event on a scenario
+	# transfer: console/pic/menu/yazlib records re-initialise from
+	# it (for the console: console_renewal reloads sysdata.cfg).
+	# Nobody in the scripts fires it; it is the exe's own event
+	# (found 2026-11-05). Args (is_load=0, name, 0): the fresh
+	# branch of $$hot_reset@CONSOLE uses the literal sysdata.cfg.
+	if event_sink.is_valid():
+		event_sink.call("HOT_RESET", [vint(0), vstr(PackedByteArray()), vint(0)])
+	return true
+
+
+## call(filename, rest...): call the named script's entrypoint as a
+## subroutine (exe FUN_0040fc30). The filename is the top stack
+## value; the remaining arguments become the callee frame's argument
+## slice; when the callee's top-level code returns, execution
+## resumes in the caller and the return value propagates through
+## the normal ret path. This is how the scenario master script
+## (starless.mjo) sequences its chapter records. Returns true when
+## the frame was pushed (the caller must not push a syscall result).
+func _call_script(thread: Dictionary, args: Array) -> bool:
+	if args.is_empty() or int(args[args.size() - 1]["k"]) != K_STRING:
+		return false
+	var nm := MajiroText.decode_cp932(args[args.size() - 1]["v"] as PackedByteArray)
+	var rec: Variant = load_script(nm)
+	if rec == null and nm != nm.to_lower():
+		rec = load_script(nm.to_lower())
+	if rec == null:
+		errors.append("call: script not found: " + nm)
+		return false
+	var extras: Array = args.slice(0, args.size() - 1)
+	var stack: Array = thread["stack"]
+	for a in extras:
+		stack.append(a)
+	var frames: Array = thread["frames"]
+	var ret_pc := -1
+	if not frames.is_empty():
+		ret_pc = int(frames[frames.size() - 1]["pc"])
+	_push_frame(thread, rec, (rec["mjo"] as MajiroMjo).entrypoint_offset, extras.size(), ret_pc)
+	return true
 
 
 var _next_tid := 1
@@ -899,6 +1049,8 @@ var _next_tid := 1
 # thread_begin(func_args..., function_hash) -> thread id.
 # The function's name hash is the LAST argument (an ldc.i immediate);
 # the preceding arguments become the new thread's call arguments.
+
+
 func _thread_begin(_parent: Dictionary, args: Array) -> Dictionary:
 	if args.is_empty():
 		return vint(0)
@@ -923,6 +1075,42 @@ func _thread_begin(_parent: Dictionary, args: Array) -> Dictionary:
 	return vint(tid)
 
 
+## CRC-32 (IEEE, reflected) over raw bytes -- the Majiro name hash.
+static func _crc32(data: PackedByteArray) -> int:
+	var crc := 0xFFFFFFFF
+	for b in data:
+		crc ^= int(b)
+		for i in 8:
+			crc = (crc >> 1) ^ (0xEDB88320 if (crc & 1) != 0 else 0)
+	return int((crc ^ 0xFFFFFFFF) & 0xFFFFFFFF)
+
+
+## get_variable / set_variable: `args` arrive in stack (push) order,
+## so the name string is the LAST element; for set, the value is the
+## first. '#' names live in the persistent synth store, others in
+## the savefile synth store; an existing cell wins over the sigil.
+func _variable_by_name(args: Array, is_set: bool) -> Dictionary:
+	if args.is_empty() or int(args[args.size() - 1]["k"]) != K_STRING:
+		return vint(0)
+	var nm := args[args.size() - 1]["v"] as PackedByteArray
+	var hash := _crc32(nm)
+	var sigil_persist := not nm.is_empty() and int(nm[0]) == 0x23  # '#'
+	if is_set:
+		if args.size() < 2:
+			return vint(0)
+		var val: Dictionary = args[0]
+		if _persist_synth.has(hash) or (sigil_persist and not _save_synth.has(hash)):
+			_persist_synth[hash] = val
+		else:
+			_save_synth[hash] = val
+		return vint(0)
+	if _persist_synth.has(hash):
+		return _persist_synth[hash]
+	if _save_synth.has(hash):
+		return _save_synth[hash]
+	return vint(0)
+
+
 func _thread_end(thread: Dictionary, args: Array) -> void:
 	var tid := _as_int(args[0]) if not args.is_empty() else int(thread.get("tid", 0))
 	if tid == int(thread.get("tid", 0)):
@@ -930,5 +1118,37 @@ func _thread_end(thread: Dictionary, args: Array) -> void:
 		return
 	for t in _threads:
 		if int(t.get("tid", -1)) == tid:
-			t["done"] = true
+			_kill_thread(t)
 			return
+
+
+## Terminate a thread: an armed bsel.5 destructor on its top frame
+## runs first (the thread resumes at the destructor and ends when
+## its frames unwind); otherwise the thread just ends.
+func _kill_thread(t: Dictionary) -> void:
+	var frames: Array = t["frames"]
+	if not frames.is_empty():
+		var fr: Dictionary = frames[frames.size() - 1]
+		if int(fr.get("dtor", 0)) != 0 and not bool(fr.get("in_dtor", false)):
+			fr["in_dtor"] = true
+			fr["pc"] = int(fr["dtor"])
+			t["wait"] = 0
+			t.erase("syscall_restore")
+			return
+	t["done"] = true
+
+
+## Host-side entry for engine callbacks (areaevent, console_on, ...):
+## starts a fresh thread running the script function `hash` with
+## `args` given in SOURCE order (first parameter first), mirroring
+## thread_begin without the trailing-hash argument convention.
+## _thread_begin expects the arguments in stack (push) order, which
+## is source order reversed -- passing them through unreversed made
+## every host-spawned callback receive its arguments flipped (the
+## buttonmenu click handler stored yl=30 as the selected item id,
+## so menu selections never latched; found via the event probes).
+func spawn_function(hash: int, args: Array) -> int:
+	var full: Array = args.duplicate()
+	full.reverse()
+	full.append(vint(hash))
+	return _as_int(_thread_begin(_cur, full))
